@@ -2,7 +2,6 @@
 
 import os
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 # Set test environment variables before any app imports
 os.environ.setdefault("API_KEY", "test-api-key-12345")
@@ -20,7 +19,19 @@ os.environ.setdefault("JWT_EXPIRY_MINUTES", "1440")
 @pytest.fixture
 def auth_headers():
     """Valid API key and JWT bearer headers for authenticated endpoints."""
-    from app.core.auth import create_access_token
+    from app.core.auth import create_access_token, get_user_store, pwd_context
+    from datetime import datetime, timezone
+    store = get_user_store()
+    if not store.user_exists(1):
+        with store._lock:
+            cur = store.conn.execute("SELECT id FROM users WHERE id = 1")
+            if not cur.fetchone():
+                hashed = pwd_context.hash("strongpassword123")
+                store.conn.execute(
+                    "INSERT OR IGNORE INTO users (id, email, hashed_password, created_at) VALUES (1, ?, ?, ?)",
+                    ("testuser1@example.com", hashed, datetime.now(timezone.utc).isoformat())
+                )
+                store.conn.commit()
     token = create_access_token(user_id=1)
     api_key = os.getenv("API_KEY", "test-api-key-12345")
     return {

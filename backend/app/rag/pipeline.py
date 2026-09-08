@@ -10,12 +10,33 @@ from typing import List, Dict, Any, AsyncGenerator, Optional
 from app.rag.retrievers.hybrid_retriever import hybrid_search
 from app.rag.graph.graph_retriever import retrieve_graph_context
 from app.rag.context_engineering import prune_irrelevant_context, build_dynamic_prompt
-from app.core.cache import increment_metric, get_cache, set_cache
+from app.core.cache import increment_metric, get_cache, set_cache, get_cache_generation
 from app.core.llm_manager import llm_manager
 from app.core.logging import sanitize_error_msg
 from app.core.telemetry import get_tracer
 
 logger = structlog.get_logger(__name__)
+
+KNOWN_ERROR_PLACEHOLDERS = {
+    "No response from Gemini API.",
+    "Error generating answer. Check server logs.",
+    "Streaming error occurred. Check server logs.",
+    "\n\n⚠️ **API Rate Limit Exceeded.** You've hit the rate limits for all fallback providers.",
+}
+
+
+def is_error_placeholder(text: str) -> bool:
+    """Check if the response text matches a known error placeholder."""
+    if not text or not text.strip():
+        return True
+    if text in KNOWN_ERROR_PLACEHOLDERS:
+        return True
+    if text.startswith("API Error (") and "Check server logs." in text:
+        return True
+    if text.startswith("Stream error (") and "Check server logs." in text:
+        return True
+    return False
+
 
 
 class RAGPipeline:
@@ -107,8 +128,11 @@ class RAGPipeline:
             text = r.get("parent_content", r.get("text", ""))[:200]
             meta = r.get("metadata") or {}
             page_number = r.get("page_number") if r.get("page_number") is not None else meta.get("page_number")
+            if page_number is None and "page" in meta:
+                page_number = meta["page"]
+            filename = r.get("filename") or meta.get("filename", "unknown")
             citations.append({
-                "filename": r.get("filename", meta.get("filename", "unknown")),
+                "filename": filename,
                 "page_number": page_number,
                 "excerpt": text,
                 "score": r.get("rerank_score", r.get("score", 0.0)),
@@ -139,6 +163,7 @@ class RAGPipeline:
         chat_history: List[Dict],
         tenant_key: str = "",
         owner_id: Optional[str] = None,
+        generation: int = 0,
     ) -> str:
         key = owner_id or tenant_key
         try:
@@ -147,7 +172,10 @@ class RAGPipeline:
             history_str = str(chat_history)
         # Salt with the owner_id / tenant key for cross-tenant and cross-user cache isolation
         tenant_salt = key or os.getenv("API_KEY", "default")
-        return "query_cache:" + hashlib.sha256(f"{tenant_salt}_{question}_{history_str}".encode()).hexdigest()
+        gen_part = f"_gen:{generation}" if (key and generation) else ""
+        return "query_cache:" + hashlib.sha256(
+            f"{tenant_salt}_{question}_{history_str}{gen_part}".encode()
+        ).hexdigest()
 
     async def ask(
         self,
@@ -159,8 +187,9 @@ class RAGPipeline:
         if chat_history is None:
             chat_history = []
 
+        generation = await get_cache_generation(owner_id) if owner_id else 0
         cache_key = self._make_cache_key(
-            question, chat_history, tenant_key=owner_id or "", owner_id=owner_id
+            question, chat_history, tenant_key=owner_id or "", owner_id=owner_id, generation=generation
         )
         cached_result = await get_cache(cache_key)
         if cached_result:
@@ -175,6 +204,7 @@ class RAGPipeline:
         t1 = time.time()
         answer = ""
         tokens_used = 0
+        llm_call_succeeded = False
         max_retries = int(os.getenv("MAX_API_RETRIES", "3"))
 
         for attempt in range(max_retries):
@@ -200,13 +230,28 @@ class RAGPipeline:
                     data = response.json()
                     
                     if provider == "gemini":
-                        if data.get("candidates"):
-                            answer = data["candidates"][0]["content"]["parts"][0]["text"]
+                        candidates = data.get("candidates") or []
+                        extracted = ""
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                extracted = parts[0].get("text", "")
+                        if extracted and extracted.strip():
+                            answer = extracted
+                            llm_call_succeeded = True
                         else:
                             answer = "No response from Gemini API."
                         tokens_used = data.get("usageMetadata", {}).get("totalTokenCount", 0)
                     else:
-                        answer = data["choices"][0]["message"]["content"]
+                        choices = data.get("choices") or []
+                        extracted = ""
+                        if choices:
+                            extracted = choices[0].get("message", {}).get("content", "")
+                        if extracted and extracted.strip():
+                            answer = extracted
+                            llm_call_succeeded = True
+                        else:
+                            answer = "Error generating answer. Check server logs."
                         tokens_used = data.get("usage", {}).get("total_tokens", 0)
                         
                     break # Success
@@ -239,7 +284,11 @@ class RAGPipeline:
             },
         }
 
-        if "Error" not in answer and "API Error" not in answer:
+        if (
+            llm_call_succeeded
+            and bool(answer and answer.strip())
+            and not is_error_placeholder(answer)
+        ):
             await set_cache(cache_key, result, ttl=86400)
 
         return result
@@ -253,8 +302,9 @@ class RAGPipeline:
         if chat_history is None:
             chat_history = []
 
+        generation = await get_cache_generation(owner_id) if owner_id else 0
         cache_key = self._make_cache_key(
-            question, chat_history, tenant_key=owner_id or "", owner_id=owner_id
+            question, chat_history, tenant_key=owner_id or "", owner_id=owner_id, generation=generation
         )
         cached_result = await get_cache(cache_key)
         if cached_result:
@@ -325,7 +375,8 @@ class RAGPipeline:
                                 except Exception:
                                     pass  # partial / non-JSON SSE line
 
-                            stream_succeeded = True
+                            if full_answer and full_answer.strip():
+                                stream_succeeded = True
                             break  # clean exit — do not retry
 
                 except httpx.HTTPStatusError as e:
@@ -355,7 +406,11 @@ class RAGPipeline:
         yield f"data: {json.dumps({'citations': citations, 'tokens_used': tokens_used})}\n\n"
         yield "data: [DONE]\n\n"
 
-        if stream_succeeded and full_answer:
+        if (
+            stream_succeeded
+            and bool(full_answer and full_answer.strip())
+            and not is_error_placeholder(full_answer)
+        ):
             result = {
                 "answer": full_answer,
                 "citations": citations,

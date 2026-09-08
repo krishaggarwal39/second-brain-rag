@@ -114,6 +114,25 @@ async def get_metric(key: str) -> float:
             return float(val)
         return 0.0
 
+
+async def bump_cache_generation(owner_id: Optional[str]) -> int:
+    """Bump the cache generation counter for owner_id to invalidate cached queries."""
+    if not owner_id:
+        return 0
+    key = f"cache_gen:{owner_id}"
+    await increment_metric(key, 1)
+    val = await get_metric(key)
+    return int(val)
+
+async def get_cache_generation(owner_id: Optional[str]) -> int:
+    """Retrieve the current cache generation counter for owner_id (defaults to 0)."""
+    if not owner_id:
+        return 0
+    key = f"cache_gen:{owner_id}"
+    val = await get_metric(key)
+    return int(val)
+
 async def close_cache():
     if _redis_client:
         await _redis_client.close()
+

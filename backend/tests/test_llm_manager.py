@@ -3,7 +3,6 @@
 import time
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
-import httpx
 
 from app.core.llm_manager import LLMManager
 

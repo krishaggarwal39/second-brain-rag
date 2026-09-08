@@ -63,7 +63,7 @@ def test_sqlite_store_remains_intact():
     try:
         # 1. Add document
         store.add_documents([
-            {"id": chunk_id, "doc_id": doc_id, "text": "SQLite full text search using fts5 index."}
+            {"id": chunk_id, "doc_id": doc_id, "text": "SQLite full text search using fts5 index.", "owner_id": "sqlite_owner"}
         ])
 
         # 2. Search
@@ -73,6 +73,15 @@ def test_sqlite_store_remains_intact():
         assert "text" in results[0]
         assert "score" in results[0]
         assert isinstance(results[0]["score"], float)
+
+        # 2b. Search with matching owner_id
+        owner_results = store.search("fts5", top_k=3, owner_id="sqlite_owner")
+        assert len(owner_results) > 0
+        assert owner_results[0]["id"] == chunk_id
+
+        # 2c. Search with non-matching owner_id
+        other_results = store.search("fts5", top_k=3, owner_id="different_owner")
+        assert other_results == []
 
         # 3. Empty query
         assert store.search("") == []
@@ -113,6 +122,53 @@ def test_sqlite_store_remains_intact():
         assert store.get_document(doc_id) is None
     finally:
         store.delete_documents_by_doc_id(doc_id)
+
+
+def test_sqlite_store_owner_isolation_search_and_delete():
+    """Verify SQLite store isolates searches and deletes across different owners."""
+    store = BM25Store()
+    user_a_doc = f"sqlite_ua_{uuid.uuid4().hex[:8]}"
+    user_b_doc = f"sqlite_ub_{uuid.uuid4().hex[:8]}"
+    c_a = f"{user_a_doc}_c1"
+    c_b = f"{user_b_doc}_c1"
+
+    try:
+        store.add_documents([
+            {"id": c_a, "doc_id": user_a_doc, "text": "Kubernetes orchestration and container deployment.", "owner_id": "user_a"},
+            {"id": c_b, "doc_id": user_b_doc, "text": "Kubernetes networking and service mesh deployment.", "owner_id": "user_b"},
+        ])
+        store.update_document_metadata(user_a_doc, "k8s_a.pdf", 1, "completed", "2026-01-01", "user_a")
+        store.update_document_metadata(user_b_doc, "k8s_b.pdf", 1, "completed", "2026-01-01", "user_b")
+
+        # Search with owner_id filter
+        res_a = store.search("Kubernetes", top_k=5, owner_id="user_a")
+        assert len(res_a) == 1
+        assert res_a[0]["id"] == c_a
+
+        res_b = store.search("Kubernetes", top_k=5, owner_id="user_b")
+        assert len(res_b) == 1
+        assert res_b[0]["id"] == c_b
+
+        # Unfiltered search returns both
+        res_all = store.search("Kubernetes", top_k=5)
+        assert len(res_all) == 2
+
+        # Owner-scoped delete: attempting to delete user_a's doc as user_b should not delete it
+        store.delete_documents_by_doc_id(user_a_doc, owner_id="user_b")
+        assert store.get_document(user_a_doc) is not None
+        assert len(store.search("Kubernetes", top_k=5, owner_id="user_a")) == 1
+
+        # Deleting user_a's doc as user_a succeeds
+        store.delete_documents_by_doc_id(user_a_doc, owner_id="user_a")
+        assert store.get_document(user_a_doc) is None
+        assert len(store.search("Kubernetes", top_k=5, owner_id="user_a")) == 0
+
+        # user_b's doc remains untouched
+        assert store.get_document(user_b_doc) is not None
+        assert len(store.search("Kubernetes", top_k=5, owner_id="user_b")) == 1
+    finally:
+        store.delete_documents_by_doc_id(user_a_doc)
+        store.delete_documents_by_doc_id(user_b_doc)
 
 
 @pytest.fixture
@@ -206,6 +262,48 @@ def test_postgres_store_delete_documents(pg_store):
     assert pg_store.get_document(doc_id) is None
     search_after = pg_store.search("quantum photon", top_k=5)
     assert not any(r["id"] == chunk_id for r in search_after)
+
+
+@requires_postgres
+def test_postgres_store_owner_isolation_search_and_delete(pg_store):
+    """Test that PostgresBM25Store isolates searches and deletes by owner_id."""
+    doc_a = pg_store.track(f"pg_iso_a_{uuid.uuid4().hex[:8]}")
+    doc_b = pg_store.track(f"pg_iso_b_{uuid.uuid4().hex[:8]}")
+    c_a = f"{doc_a}_c1"
+    c_b = f"{doc_b}_c1"
+
+    pg_store.add_documents([
+        {"id": c_a, "doc_id": doc_a, "text": "Astrophysics and relativistic cosmology theories.", "owner_id": "user_astro"},
+        {"id": c_b, "doc_id": doc_b, "text": "Astrophysics and observational astronomy instrumentation.", "owner_id": "user_obs"},
+    ])
+    pg_store.update_document_metadata(doc_a, "cosmo.pdf", 1, "completed", "2026-01-01", "user_astro")
+    pg_store.update_document_metadata(doc_b, "obs.pdf", 1, "completed", "2026-01-01", "user_obs")
+
+    # Search with owner_id filter
+    res_a = pg_store.search("Astrophysics", top_k=5, owner_id="user_astro")
+    assert any(r["id"] == c_a for r in res_a)
+    assert not any(r["id"] == c_b for r in res_a)
+
+    res_b = pg_store.search("Astrophysics", top_k=5, owner_id="user_obs")
+    assert any(r["id"] == c_b for r in res_b)
+    assert not any(r["id"] == c_a for r in res_b)
+
+    # Search without owner_id returns both
+    res_all = pg_store.search("Astrophysics", top_k=5)
+    assert any(r["id"] == c_a for r in res_all)
+    assert any(r["id"] == c_b for r in res_all)
+
+    # Owner-scoped delete: trying to delete doc_a with wrong owner should do nothing
+    pg_store.delete_documents_by_doc_id(doc_a, owner_id="user_obs")
+    assert pg_store.get_document(doc_a) is not None
+    assert any(r["id"] == c_a for r in pg_store.search("Astrophysics", top_k=5, owner_id="user_astro"))
+
+    # Deleting with correct owner should succeed
+    pg_store.delete_documents_by_doc_id(doc_a, owner_id="user_astro")
+    assert pg_store.get_document(doc_a) is None
+    assert not any(r["id"] == c_a for r in pg_store.search("Astrophysics", top_k=5, owner_id="user_astro"))
+    # doc_b still remains
+    assert pg_store.get_document(doc_b) is not None
 
 
 @requires_postgres

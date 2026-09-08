@@ -1,6 +1,5 @@
 """Tests for the recursive parent-child chunker."""
 
-import pytest
 from unittest.mock import patch
 from langchain_core.documents import Document
 

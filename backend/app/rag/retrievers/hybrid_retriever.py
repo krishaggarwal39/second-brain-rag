@@ -55,6 +55,19 @@ def reciprocal_rank_fusion(
     return [doc_map[doc_id] for doc_id, _ in sorted_docs]
 
 
+def _copy_metadata_to_doc(doc: Dict) -> None:
+    """Consistently copy metadata fields (filename, page_number) to top-level doc."""
+    meta = doc.get("metadata") or {}
+    if not doc.get("filename"):
+        fname = meta.get("filename") or meta.get("file_name")
+        if fname:
+            doc["filename"] = fname
+    if doc.get("page_number") is None:
+        page_num = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        if page_num is not None:
+            doc["page_number"] = page_num
+
+
 async def hybrid_search(
     query: str, top_k: int = 5, owner_id: Optional[str] = None
 ) -> List[Dict]:
@@ -78,9 +91,11 @@ async def hybrid_search(
             embeddings[0], n_results=fetch_k, score_threshold=0.0, filters=filters
         )
 
-    # 2. Sparse search (BM25)
+    # 2. Sparse search (BM25) - owner-filtered at store level
     bm25_store = get_bm25_store()
-    sparse_results = await asyncio.to_thread(bm25_store.search, query, fetch_k)
+    sparse_results = await asyncio.to_thread(
+        bm25_store.search, query, fetch_k, owner_id=owner_id
+    )
 
     # 3. RRF Fusion
     fused_results = reciprocal_rank_fusion(dense_results, sparse_results)
@@ -93,13 +108,10 @@ async def hybrid_search(
             if not doc.get("metadata") and doc.get("id") in meta_map:
                 doc["metadata"] = meta_map[doc["id"]]
 
-    # User isolation: restrict fused results to owner_id if specified.
-    # Because BM25/Postgres sparse store search() has no owner filter, the simplest
-    # correct and least invasive approach is to filter the fused results by matching
-    # the chunk's owner_id from Chroma metadata against the target owner_id. Any chunk
-    # that does not belong to this owner (or has missing metadata) is excluded.
-    # This guarantees a user only ever sees their own chunks without modifying
-    # SQLite/Postgres store internals or retrieval fusion/rerank math.
+    for doc in fused_results:
+        _copy_metadata_to_doc(doc)
+
+    # User isolation: restrict fused results to owner_id if specified (defense-in-depth).
     if owner_id:
         target_owner = str(owner_id)
         fused_results = [
@@ -109,11 +121,7 @@ async def hybrid_search(
 
     if not reranker or not fused_results:
         for doc in fused_results:
-            meta = doc.get("metadata", {})
-            if "filename" in meta:
-                doc["filename"] = meta["filename"]
-            if "page_number" in meta:
-                doc["page_number"] = meta["page_number"]
+            _copy_metadata_to_doc(doc)
         return fused_results[:top_k]
 
     # 4. Reranking (Cross-Encoder) — CPU-bound, runs in thread pool
@@ -131,10 +139,7 @@ async def hybrid_search(
                 parent_text = await get_cache(f"parent:{parent_id}")
                 if parent_text:
                     doc["parent_content"] = parent_text
-            if "filename" in meta:
-                doc["filename"] = meta["filename"]
-            if "page_number" in meta:
-                doc["page_number"] = meta["page_number"]
+            _copy_metadata_to_doc(doc)
 
         reranked_results = sorted(
             fused_results, key=lambda x: x["rerank_score"], reverse=True
@@ -143,9 +148,5 @@ async def hybrid_search(
     except Exception as e:
         logger.error(f"Reranking failed: {e}")
         for doc in fused_results:
-            meta = doc.get("metadata", {})
-            if "filename" in meta:
-                doc["filename"] = meta["filename"]
-            if "page_number" in meta:
-                doc["page_number"] = meta["page_number"]
+            _copy_metadata_to_doc(doc)
         return fused_results[:top_k]

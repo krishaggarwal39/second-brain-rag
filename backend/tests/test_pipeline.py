@@ -1,7 +1,5 @@
 import pytest
 from app.rag.pipeline import RAGPipeline
-import os
-import json
 
 @pytest.fixture
 def pipeline():
@@ -88,3 +86,131 @@ def test_format_citations(pipeline):
     assert citations[2]["filename"] == "doc2.pdf"
     assert citations[2]["score"] == 0.9
     assert citations[2]["page_number"] == 12
+
+
+def test_make_cache_key_with_generation(pipeline):
+    history = [{"role": "user", "content": "hi"}]
+    # Owner 1 at gen 0
+    k_gen0 = pipeline._make_cache_key("hello", history, owner_id="1", generation=0)
+    # Owner 1 at gen 1 (bumped)
+    k_gen1 = pipeline._make_cache_key("hello", history, owner_id="1", generation=1)
+    # Owner 1 at gen 2 (bumped again)
+    k_gen2 = pipeline._make_cache_key("hello", history, owner_id="1", generation=2)
+
+    assert k_gen0 != k_gen1
+    assert k_gen1 != k_gen2
+
+    # User 2 at gen 1 is distinct from User 1 at gen 1
+    k_user2_gen1 = pipeline._make_cache_key("hello", history, owner_id="2", generation=1)
+    assert k_gen1 != k_user2_gen1
+
+    # owner_id=None falls back to current behavior regardless of generation
+    k_none_g0 = pipeline._make_cache_key("hello", history, owner_id=None, generation=0)
+    k_none_g1 = pipeline._make_cache_key("hello", history, owner_id=None, generation=1)
+    assert k_none_g0 == k_none_g1
+
+
+@pytest.mark.asyncio
+async def test_ask_caching_with_success_flag(pipeline):
+    from unittest.mock import AsyncMock, patch, MagicMock
+
+    with patch.object(pipeline, "_retrieve_all_context", new_callable=AsyncMock) as mock_retrieve, \
+         patch("app.rag.pipeline.set_cache", new_callable=AsyncMock) as mock_set_cache, \
+         patch("app.rag.pipeline.get_cache", new_callable=AsyncMock, return_value=None), \
+         patch("app.rag.pipeline.increment_metric", new_callable=AsyncMock), \
+         patch("app.rag.pipeline.llm_manager.get_active_provider", return_value="groq"), \
+         patch("app.rag.pipeline.llm_manager.get_api_key", return_value="fake-key"):
+
+        mock_retrieve.return_value = ([], "", 5.0)
+
+        # 1. Legit answer containing the word "Error" (previously false-positive: was blocked from cache)
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.raise_for_status = MagicMock()
+        mock_response_ok.json.return_value = {
+            "choices": [{"message": {"content": "The ValueError was raised because the input was invalid."}}],
+            "usage": {"total_tokens": 10},
+        }
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response_ok):
+            res = await pipeline.ask("How to fix my code?", owner_id="user1")
+            assert "ValueError" in res["answer"]
+            mock_set_cache.assert_called_once()
+            _, set_cache_args, _ = mock_set_cache.mock_calls[0]
+            assert set_cache_args[1]["answer"] == "The ValueError was raised because the input was invalid."
+
+        mock_set_cache.reset_mock()
+
+        # 2. HTTP error (e.g. 500) returns error string and must NOT be cached
+        import httpx
+        req = httpx.Request("POST", "http://test")
+        resp_500 = httpx.Response(500, request=req, text="Server Error")
+        http_err = httpx.HTTPStatusError("500 Server Error", request=req, response=resp_500)
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=http_err):
+            res = await pipeline.ask("Question causing error?", owner_id="user1")
+            assert "API Error (500)" in res["answer"]
+            mock_set_cache.assert_not_called()
+
+        mock_set_cache.reset_mock()
+
+        # 3. Model returning empty content / error placeholder must NOT be cached
+        mock_response_empty = MagicMock()
+        mock_response_empty.status_code = 200
+        mock_response_empty.raise_for_status = MagicMock()
+        mock_response_empty.json.return_value = {
+            "choices": [{"message": {"content": ""}}],
+            "usage": {"total_tokens": 0},
+        }
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response_empty):
+            res = await pipeline.ask("Question with empty answer?", owner_id="user1")
+            mock_set_cache.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ask_stream_caching_validation(pipeline):
+    from unittest.mock import AsyncMock, patch
+
+    with patch.object(pipeline, "_retrieve_all_context", new_callable=AsyncMock) as mock_retrieve, \
+         patch("app.rag.pipeline.set_cache", new_callable=AsyncMock) as mock_set_cache, \
+         patch("app.rag.pipeline.get_cache", new_callable=AsyncMock, return_value=None), \
+         patch("app.rag.pipeline.increment_metric", new_callable=AsyncMock), \
+         patch("app.rag.pipeline.llm_manager.get_active_provider", return_value="groq"), \
+         patch("app.rag.pipeline.llm_manager.get_api_key", return_value="fake-key"):
+
+        mock_retrieve.return_value = ([], "", 5.0)
+
+        # 1. Successful stream with non-empty answer is cached
+        class MockStreamSuccess:
+            status_code = 200
+            def raise_for_status(self): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def aiter_lines(self):
+                yield 'data: {"choices": [{"delta": {"content": "Hello"}}]}'
+                yield 'data: {"choices": [{"delta": {"content": " world"}}]}'
+                yield 'data: [DONE]'
+
+        with patch("httpx.AsyncClient.stream", return_value=MockStreamSuccess()):
+            chunks = [c async for c in pipeline.ask_stream("Hi", owner_id="user1")]
+            assert len(chunks) > 0
+            mock_set_cache.assert_called_once()
+            _, args, _ = mock_set_cache.mock_calls[0]
+            assert args[1]["answer"] == "Hello world"
+
+        mock_set_cache.reset_mock()
+
+        # 2. Stream with empty content is NOT cached
+        class MockStreamEmpty:
+            status_code = 200
+            def raise_for_status(self): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def aiter_lines(self):
+                yield 'data: [DONE]'
+
+        with patch("httpx.AsyncClient.stream", return_value=MockStreamEmpty()):
+            chunks = [c async for c in pipeline.ask_stream("Hi", owner_id="user1")]
+            mock_set_cache.assert_not_called()
+

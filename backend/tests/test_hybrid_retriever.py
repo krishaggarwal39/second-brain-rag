@@ -179,6 +179,9 @@ class TestHybridSearch:
             _, kwargs = mock_chroma_query.call_args
             assert kwargs.get("filters") == {"owner_id": owner}
 
+            # BM25 sparse store search must have received owner_id
+            mock_store.search.assert_called_once_with("query text", 15, owner_id=owner)
+
             # Only user-42 documents should be in results
             result_ids = [r["id"] for r in results]
             assert "doc-dense-1" in result_ids
@@ -228,3 +231,60 @@ class TestHybridSearch:
             assert results[0]["page_number"] == 5
             assert results[0]["metadata"]["page_number"] == 5
             assert results[0]["filename"] == "ai.pdf"
+
+    @pytest.mark.asyncio
+    async def test_bm25_only_match_hydrates_page_number_and_filename_non_reranked(self):
+        """BM25-only matches should have page_number and filename copied to top level without reranker."""
+        sparse_results = [
+            {"id": "sparse-chunk-1", "text": "BM25 only chunk text", "score": 3.0}
+        ]
+        chunk_metas = {
+            "sparse-chunk-1": {"filename": "manual.pdf", "page_number": 9, "owner_id": "user-1"}
+        }
+
+        with patch("app.rag.retrievers.hybrid_retriever.embed_documents", new_callable=AsyncMock, return_value=[]), \
+             patch("app.rag.retrievers.hybrid_retriever.chroma_query", new_callable=AsyncMock, return_value=[]), \
+             patch("app.rag.retrievers.hybrid_retriever.get_chunk_metadatas", new_callable=AsyncMock, return_value=chunk_metas), \
+             patch("app.rag.retrievers.hybrid_retriever.get_bm25_store") as mock_bm25_store, \
+             patch("app.rag.retrievers.hybrid_retriever.reranker", None):
+
+            mock_store = MagicMock()
+            mock_store.search.return_value = sparse_results
+            mock_bm25_store.return_value = mock_store
+
+            from app.rag.retrievers.hybrid_retriever import hybrid_search
+
+            results = await hybrid_search("manual", top_k=1, owner_id="user-1")
+            assert len(results) == 1
+            assert results[0]["filename"] == "manual.pdf"
+            assert results[0]["page_number"] == 9
+
+    @pytest.mark.asyncio
+    async def test_bm25_only_match_hydrates_page_number_and_filename_reranked(self):
+        """BM25-only matches should have page_number and filename copied to top level with CrossEncoder."""
+        sparse_results = [
+            {"id": "sparse-chunk-1", "text": "BM25 only chunk text", "score": 3.0}
+        ]
+        chunk_metas = {
+            "sparse-chunk-1": {"filename": "guide.pdf", "page_number": 42, "owner_id": "user-2"}
+        }
+        mock_reranker = MagicMock()
+        mock_reranker.predict.return_value = [0.85]
+
+        with patch("app.rag.retrievers.hybrid_retriever.embed_documents", new_callable=AsyncMock, return_value=[]), \
+             patch("app.rag.retrievers.hybrid_retriever.chroma_query", new_callable=AsyncMock, return_value=[]), \
+             patch("app.rag.retrievers.hybrid_retriever.get_chunk_metadatas", new_callable=AsyncMock, return_value=chunk_metas), \
+             patch("app.rag.retrievers.hybrid_retriever.get_bm25_store") as mock_bm25_store, \
+             patch("app.rag.retrievers.hybrid_retriever.reranker", mock_reranker):
+
+            mock_store = MagicMock()
+            mock_store.search.return_value = sparse_results
+            mock_bm25_store.return_value = mock_store
+
+            from app.rag.retrievers.hybrid_retriever import hybrid_search
+
+            results = await hybrid_search("guide", top_k=1, owner_id="user-2")
+            assert len(results) == 1
+            assert results[0]["filename"] == "guide.pdf"
+            assert results[0]["page_number"] == 42
+

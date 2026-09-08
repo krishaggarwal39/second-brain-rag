@@ -131,14 +131,22 @@ async def query(
 
 
 @_chroma_retry
-async def delete_document(doc_id: str):
-    get_collection().delete(where={"doc_id": doc_id})
+async def delete_document(doc_id: str, owner_id: Optional[str] = None):
+    if owner_id:
+        where_clause = {"$and": [{"doc_id": doc_id}, {"owner_id": str(owner_id)}]}
+    else:
+        where_clause = {"doc_id": doc_id}
+    get_collection().delete(where=where_clause)
 
 
 @_chroma_retry
-async def get_document_parents(doc_id: str) -> set:
+async def get_document_parents(doc_id: str, owner_id: Optional[str] = None) -> set:
     collection = get_collection()
-    results = collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+    if owner_id:
+        where_clause = {"$and": [{"doc_id": doc_id}, {"owner_id": str(owner_id)}]}
+    else:
+        where_clause = {"doc_id": doc_id}
+    results = collection.get(where=where_clause, include=["metadatas"])
     parents = set()
     for m in results.get("metadatas", []):
         if m and "parent_id" in m:
