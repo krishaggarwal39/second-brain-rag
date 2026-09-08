@@ -1,6 +1,5 @@
 """Tests for context engineering (prompt building and security)."""
 
-import pytest
 from app.rag.context_engineering import (
     count_tokens,
     prune_irrelevant_context,

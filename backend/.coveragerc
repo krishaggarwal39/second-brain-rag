@@ -1,0 +1,25 @@
+[run]
+source = app
+branch = True
+omit =
+    # Telemetry is exporter wiring, exercised only with a live OTLP collector
+    app/core/telemetry.py
+    # Neo4j graph layer requires a live Neo4j instance (covered by integration env)
+    app/rag/graph/*
+    # Web loader shells out to curl against live network hosts
+    app/rag/loaders/web_loader.py
+
+[report]
+# Fail the build if coverage of the measured (unit-testable) code drops below this.
+# Baseline is intentionally set to what the SQLite-only CI run achieves today
+# (~70%). The Postgres store class and live-LLM streaming paths are exercised in
+# the integration environment (DATABASE_URL set), which raises real coverage
+# further. Ratchet this number up as coverage improves; never lower it.
+fail_under = 70
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    \.\.\.

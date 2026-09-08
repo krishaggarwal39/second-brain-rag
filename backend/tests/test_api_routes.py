@@ -22,7 +22,19 @@ def client():
 @pytest.fixture
 def auth_headers():
     """Valid API key and JWT bearer headers for authenticated endpoints."""
-    from app.core.auth import create_access_token
+    from app.core.auth import create_access_token, get_user_store, pwd_context
+    from datetime import datetime, timezone
+    store = get_user_store()
+    if not store.user_exists(1):
+        with store._lock:
+            cur = store.conn.execute("SELECT id FROM users WHERE id = 1")
+            if not cur.fetchone():
+                hashed = pwd_context.hash("strongpassword123")
+                store.conn.execute(
+                    "INSERT OR IGNORE INTO users (id, email, hashed_password, created_at) VALUES (1, ?, ?, ?)",
+                    ("testuser1@example.com", hashed, datetime.now(timezone.utc).isoformat())
+                )
+                store.conn.commit()
     token = create_access_token(user_id=1)
     api_key = os.getenv("API_KEY", "test-api-key-12345")
     return {
@@ -156,8 +168,8 @@ class TestDocumentRoutes:
 
     def test_delete_doc_owner_success(self, client, auth_headers):
         with patch("app.api.routes.documents.get_bm25_store") as mock_bm25, \
-             patch("app.api.routes.documents.get_document_parents", new_callable=AsyncMock, return_value=[]), \
-             patch("app.api.routes.documents.delete_document", new_callable=AsyncMock):
+             patch("app.api.routes.documents.get_document_parents", new_callable=AsyncMock, return_value=[]) as mock_parents, \
+             patch("app.api.routes.documents.delete_document", new_callable=AsyncMock) as mock_delete:
             mock_store = MagicMock()
             mock_store.get_document_metadata.return_value = [
                 {"doc_id": "doc-1", "owner_id": "1"}
@@ -167,6 +179,26 @@ class TestDocumentRoutes:
             response = client.delete("/documents/doc-1", headers=auth_headers)
             assert response.status_code == 200
             assert response.json()["status"] == "deleted"
+            mock_parents.assert_called_once_with("doc-1", owner_id="1")
+            mock_delete.assert_called_once_with("doc-1", owner_id="1")
+            mock_store.delete_documents_by_doc_id.assert_called_once_with("doc-1", owner_id="1")
+
+    def test_upload_url_generates_scoped_doc_id(self, client, auth_headers):
+        with patch("app.worker.process_url_task.delay") as mock_delay:
+            response = client.post(
+                "/documents/url",
+                headers=auth_headers,
+                json={"url": "https://example.com/test"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "processing"
+            assert "job_id" in data
+            assert "doc_id" in data
+            assert data["doc_id"].startswith("1:")
+            mock_delay.assert_called_once_with(
+                "https://example.com/test", data["job_id"], "1", data["doc_id"]
+            )
 
     def test_delete_doc_other_owner_forbidden(self, client, auth_headers):
         with patch("app.api.routes.documents.get_bm25_store") as mock_bm25:
@@ -187,6 +219,43 @@ class TestDocumentRoutes:
 
             response = client.delete("/documents/missing-doc", headers=auth_headers)
             assert response.status_code == 403
+
+    def test_cache_generation_bumped_on_document_changes(self, client, auth_headers):
+        with patch("app.api.routes.documents.bump_cache_generation", new_callable=AsyncMock) as mock_bump, \
+             patch("app.api.routes.documents.get_bm25_store") as mock_bm25, \
+             patch("app.api.routes.documents.get_document_parents", new_callable=AsyncMock, return_value=[]), \
+             patch("app.api.routes.documents.delete_document", new_callable=AsyncMock), \
+             patch("app.worker.process_url_task.delay"), \
+             patch("app.worker.process_file_task.delay"), \
+             patch("magic.from_file", return_value="application/pdf"):
+
+            # 1. URL upload bumps generation for owner "1"
+            res = client.post("/documents/url", headers=auth_headers, json={"url": "https://example.com/test"})
+            assert res.status_code == 200
+            mock_bump.assert_called_with("1")
+
+            mock_bump.reset_mock()
+
+            # 2. File upload bumps generation for owner "1"
+            res = client.post(
+                "/documents/upload",
+                headers=auth_headers,
+                files={"file": ("doc.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+            )
+            assert res.status_code == 200
+            mock_bump.assert_called_with("1")
+
+            mock_bump.reset_mock()
+
+            # 3. Delete document bumps generation for owner "1"
+            mock_store = MagicMock()
+            mock_store.get_document_metadata.return_value = [{"doc_id": "doc-1", "owner_id": "1"}]
+            mock_bm25.return_value = mock_store
+
+            res = client.delete("/documents/doc-1", headers=auth_headers)
+            assert res.status_code == 200
+            mock_bump.assert_called_with("1")
+
 
 
 class TestChatRoutes:
@@ -285,3 +354,21 @@ class TestAuthRoutes:
             "password": "wrongpassword"
         })
         assert bad_login.status_code == 401
+
+    def test_login_unknown_email_returns_401(self, client):
+        resp = client.post("/auth/login", json={
+            "email": "nonexistent_unknown_user_99999@example.com",
+            "password": "wrongpassword123"
+        })
+        assert resp.status_code == 401
+
+    def test_token_for_nonexistent_user_returns_401(self, client):
+        from app.core.auth import create_access_token
+        fake_token = create_access_token(user_id=99999999)
+        api_key = os.getenv("API_KEY", "test-api-key-12345")
+        resp = client.get("/documents", headers={
+            "X-API-Key": api_key,
+            "Authorization": f"Bearer {fake_token}",
+        })
+        assert resp.status_code == 401
+

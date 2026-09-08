@@ -30,7 +30,7 @@ class BM25Store:
         
         # Initialize schema
         self.conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS corpus USING fts5(id UNINDEXED, text, doc_id UNINDEXED);
+            CREATE VIRTUAL TABLE IF NOT EXISTS corpus USING fts5(id UNINDEXED, text, doc_id UNINDEXED, owner_id UNINDEXED);
         """)
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS corpus_mapping (
@@ -55,6 +55,26 @@ class BM25Store:
         if "owner_id" not in columns:
             self.conn.execute("ALTER TABLE document_metadata ADD COLUMN owner_id TEXT;")
             self.conn.commit()
+
+        # Guarded migration: ensure owner_id column exists on corpus
+        cursor = self.conn.execute("PRAGMA table_info(corpus);")
+        corpus_columns = [row[1] for row in cursor.fetchall()]
+        if "owner_id" not in corpus_columns:
+            logger.info("Migrating SQLite FTS5 corpus table to include owner_id...")
+            self.conn.execute("DROP TABLE IF EXISTS corpus_new;")
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE corpus_new USING fts5(id UNINDEXED, text, doc_id UNINDEXED, owner_id UNINDEXED);"
+            )
+            self.conn.execute("""
+                INSERT INTO corpus_new (rowid, id, text, doc_id, owner_id)
+                SELECT c.rowid, c.id, c.text, c.doc_id, coalesce(m.owner_id, '')
+                FROM corpus c
+                LEFT JOIN document_metadata m ON c.doc_id = m.doc_id;
+            """)
+            self.conn.execute("DROP TABLE corpus;")
+            self.conn.execute("ALTER TABLE corpus_new RENAME TO corpus;")
+            self.conn.commit()
+            logger.info("SQLite FTS5 corpus migration completed.")
 
         # Create indexes for fast lookup
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mapping_chunk_id ON corpus_mapping(chunk_id);")
@@ -107,6 +127,7 @@ class BM25Store:
                 chunk_id = d["id"]
                 text = d["text"]
                 doc_id = d.get("doc_id", "unknown")
+                owner_id = str(d.get("owner_id", "") or "")
                 
                 # Delete existing chunk if present (using O(1) rowid lookup)
                 cursor = self.conn.execute("SELECT rowid FROM corpus_mapping WHERE chunk_id = ?", (chunk_id,))
@@ -118,8 +139,8 @@ class BM25Store:
                 
                 # Insert into FTS5
                 cursor = self.conn.execute(
-                    "INSERT INTO corpus (id, text, doc_id) VALUES (?, ?, ?)",
-                    (chunk_id, text, doc_id)
+                    "INSERT INTO corpus (id, text, doc_id, owner_id) VALUES (?, ?, ?, ?)",
+                    (chunk_id, text, doc_id, owner_id)
                 )
                 new_rowid = cursor.lastrowid
                 
@@ -132,19 +153,30 @@ class BM25Store:
             self.conn.commit()
         logger.info(f"Added {len(documents)} documents to BM25 index.")
 
-    def delete_documents_by_doc_id(self, doc_id: str):
+    def delete_documents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None):
         with self._lock:
-            # Find all rowids for this doc_id
-            cursor = self.conn.execute("SELECT rowid FROM corpus_mapping WHERE doc_id = ?", (doc_id,))
-            rowids = [row[0] for row in cursor.fetchall()]
-            
-            for rid in rowids:
-                self.conn.execute("DELETE FROM corpus WHERE rowid = ?", (rid,))
-                
-            self.conn.execute("DELETE FROM corpus_mapping WHERE doc_id = ?", (doc_id,))
-            
-            # Also clean up metadata
-            self.conn.execute("DELETE FROM document_metadata WHERE doc_id = ?", (doc_id,))
+            if owner_id is not None:
+                # Find all rowids for this doc_id matching owner_id
+                cursor = self.conn.execute(
+                    "SELECT rowid FROM corpus WHERE doc_id = ? AND owner_id = ?",
+                    (doc_id, str(owner_id))
+                )
+                rowids = [row[0] for row in cursor.fetchall()]
+                for rid in rowids:
+                    self.conn.execute("DELETE FROM corpus WHERE rowid = ?", (rid,))
+                    self.conn.execute("DELETE FROM corpus_mapping WHERE rowid = ?", (rid,))
+                self.conn.execute(
+                    "DELETE FROM document_metadata WHERE doc_id = ? AND owner_id = ?",
+                    (doc_id, str(owner_id))
+                )
+            else:
+                # Find all rowids for this doc_id
+                cursor = self.conn.execute("SELECT rowid FROM corpus_mapping WHERE doc_id = ?", (doc_id,))
+                rowids = [row[0] for row in cursor.fetchall()]
+                for rid in rowids:
+                    self.conn.execute("DELETE FROM corpus WHERE rowid = ?", (rid,))
+                self.conn.execute("DELETE FROM corpus_mapping WHERE doc_id = ?", (doc_id,))
+                self.conn.execute("DELETE FROM document_metadata WHERE doc_id = ?", (doc_id,))
             self.conn.commit()
         logger.info(f"Deleted chunks from BM25 for doc_id: {doc_id}")
 
@@ -204,36 +236,53 @@ class BM25Store:
         docs = self.get_document_metadata(doc_id=doc_id)
         return docs[0] if docs else None
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search(self, query: str, top_k: int = 5, owner_id: Optional[str] = None) -> List[Dict]:
         import re
-        if not query.strip():
+        if not query.strip() or top_k <= 0:
             return []
-            
+
         words = [w for w in re.split(r'\W+', query) if w]
         if not words:
             return []
         safe_query = " OR ".join(words)
-        
+
+        # The single shared connection (check_same_thread=False) is NOT safe for
+        # concurrent read+write across threads — SQLite raises InterfaceError. Serialize
+        # reads under the same lock used for writes so the store is thread-safe when
+        # called via asyncio.to_thread from multiple concurrent requests.
         try:
-            cursor = self.conn.execute(
-                """
-                SELECT id, text, -bm25(corpus) as score 
-                FROM corpus 
-                WHERE corpus MATCH ? 
-                ORDER BY score DESC 
-                LIMIT ?
-                """, 
-                (safe_query, top_k)
-            )
-            results = []
-            for row in cursor:
-                if row[2] > 0:
-                    results.append({"id": row[0], "text": row[1], "score": float(row[2])})
-            return results
+            with self._lock:
+                if owner_id is not None:
+                    cursor = self.conn.execute(
+                        """
+                        SELECT id, text, -bm25(corpus) as score
+                        FROM corpus
+                        WHERE corpus MATCH ? AND owner_id = ?
+                        ORDER BY score DESC
+                        LIMIT ?
+                        """,
+                        (safe_query, str(owner_id), top_k)
+                    )
+                else:
+                    cursor = self.conn.execute(
+                        """
+                        SELECT id, text, -bm25(corpus) as score
+                        FROM corpus
+                        WHERE corpus MATCH ?
+                        ORDER BY score DESC
+                        LIMIT ?
+                        """,
+                        (safe_query, top_k)
+                    )
+                results = []
+                for row in cursor:
+                    if row[2] > 0:
+                        results.append({"id": row[0], "text": row[1], "score": float(row[2])})
+                return results
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 query failed (likely syntax error with input string): {e}")
             return []
-            
+
     def get_total_docs(self) -> int:
         with self._lock:
             cursor = self.conn.execute("SELECT COUNT(*) FROM document_metadata")
@@ -355,17 +404,22 @@ class PostgresBM25Store:
                     CREATE TABLE IF NOT EXISTS corpus (
                         chunk_id TEXT PRIMARY KEY,
                         doc_id TEXT,
+                        owner_id TEXT,
                         text TEXT,
                         ts tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(text, ''))) STORED
                     );
                 """)
 
-                # Guarded check: ensure ts column exists if corpus table pre-existed
+                # Guarded check: ensure owner_id column exists if corpus table pre-existed
                 cur.execute("""
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'corpus';
                 """)
                 corpus_cols = {row[0] for row in cur.fetchall()}
+                if corpus_cols and "owner_id" not in corpus_cols:
+                    cur.execute("ALTER TABLE corpus ADD COLUMN owner_id TEXT;")
+
+                # Guarded check: ensure ts column exists if corpus table pre-existed
                 if corpus_cols and "ts" not in corpus_cols:
                     cur.execute("""
                         ALTER TABLE corpus ADD COLUMN ts tsvector
@@ -378,6 +432,9 @@ class PostgresBM25Store:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_corpus_doc_id ON corpus(doc_id);"
                 )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_corpus_owner_id ON corpus(owner_id);"
+                )
             conn.commit()
 
     def add_documents(self, documents: List[Dict[str, str]]):
@@ -386,16 +443,22 @@ class PostgresBM25Store:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 params = [
-                    (str(d["id"]), str(d.get("doc_id", "unknown")), d.get("text", "") or "")
+                    (
+                        str(d["id"]),
+                        str(d.get("doc_id", "unknown")),
+                        str(d["owner_id"]) if d.get("owner_id") is not None else None,
+                        d.get("text", "") or ""
+                    )
                     for d in documents
                 ]
                 execute_batch(
                     cur,
                     """
-                    INSERT INTO corpus (chunk_id, doc_id, text)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO corpus (chunk_id, doc_id, owner_id, text)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (chunk_id) DO UPDATE SET
                         doc_id = EXCLUDED.doc_id,
+                        owner_id = COALESCE(EXCLUDED.owner_id, corpus.owner_id),
                         text = EXCLUDED.text;
                     """,
                     params,
@@ -403,11 +466,21 @@ class PostgresBM25Store:
             conn.commit()
         logger.info(f"Added {len(documents)} documents to BM25 index.")
 
-    def delete_documents_by_doc_id(self, doc_id: str):
+    def delete_documents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None):
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM corpus WHERE doc_id = %s;", (doc_id,))
-                cur.execute("DELETE FROM document_metadata WHERE doc_id = %s;", (doc_id,))
+                if owner_id is not None:
+                    cur.execute(
+                        "DELETE FROM corpus WHERE doc_id = %s AND owner_id = %s;",
+                        (doc_id, str(owner_id))
+                    )
+                    cur.execute(
+                        "DELETE FROM document_metadata WHERE doc_id = %s AND owner_id = %s;",
+                        (doc_id, str(owner_id))
+                    )
+                else:
+                    cur.execute("DELETE FROM corpus WHERE doc_id = %s;", (doc_id,))
+                    cur.execute("DELETE FROM document_metadata WHERE doc_id = %s;", (doc_id,))
             conn.commit()
         logger.info(f"Deleted chunks from BM25 for doc_id: {doc_id}")
 
@@ -474,21 +547,33 @@ class PostgresBM25Store:
         docs = self.get_document_metadata(doc_id=doc_id)
         return docs[0] if docs else None
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search(self, query: str, top_k: int = 5, owner_id: Optional[str] = None) -> List[Dict]:
         if not query or not query.strip() or top_k <= 0:
             return []
 
-        sql = """
-            SELECT chunk_id, text, ts_rank_cd(ts, query) AS score
-            FROM corpus, websearch_to_tsquery('english', %s) query
-            WHERE ts @@ query
-            ORDER BY score DESC
-            LIMIT %s;
-        """
+        if owner_id is not None:
+            sql = """
+                SELECT chunk_id, text, ts_rank_cd(ts, query) AS score
+                FROM corpus, websearch_to_tsquery('english', %s) query
+                WHERE ts @@ query AND owner_id = %s
+                ORDER BY score DESC
+                LIMIT %s;
+            """
+            params = (query.strip(), str(owner_id), top_k)
+        else:
+            sql = """
+                SELECT chunk_id, text, ts_rank_cd(ts, query) AS score
+                FROM corpus, websearch_to_tsquery('english', %s) query
+                WHERE ts @@ query
+                ORDER BY score DESC
+                LIMIT %s;
+            """
+            params = (query.strip(), top_k)
+
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (query.strip(), top_k))
+                    cur.execute(sql, params)
                     rows = cur.fetchall()
                     results = []
                     for row in rows:

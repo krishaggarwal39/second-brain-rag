@@ -88,3 +88,13 @@ backend/loadtest/results/*.csv
 
 # Agents/tools scratch
 .agents/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+
+# Backend coverage
+backend/coverage.xml
+backend/.coverage
+backend/.coverage.*

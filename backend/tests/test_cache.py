@@ -12,6 +12,8 @@ with patch.dict("os.environ", {"CACHE_BACKEND": "memory"}):
         delete_cache,
         increment_metric,
         get_metric,
+        bump_cache_generation,
+        get_cache_generation,
         _local_cache,
     )
 
@@ -94,3 +96,35 @@ class TestMetrics:
     async def test_get_nonexistent_metric(self):
         result = await get_metric("never_set")
         assert result == 0.0
+
+
+class TestCacheGeneration:
+    @pytest.mark.asyncio
+    async def test_generation_lifecycle_and_isolation(self):
+        # Starts at 0
+        assert await get_cache_generation("user_1") == 0
+        assert await get_cache_generation(None) == 0
+
+        # None does not bump or create keys
+        assert await bump_cache_generation(None) == 0
+        assert await get_cache_generation(None) == 0
+
+        # Bumping user_1 increments to 1
+        gen1 = await bump_cache_generation("user_1")
+        assert gen1 == 1
+        assert await get_cache_generation("user_1") == 1
+
+        # Bumping user_1 again increments to 2
+        gen2 = await bump_cache_generation("user_1")
+        assert gen2 == 2
+        assert await get_cache_generation("user_1") == 2
+
+        # user_2 is isolated and still at 0
+        assert await get_cache_generation("user_2") == 0
+        gen_u2 = await bump_cache_generation("user_2")
+        assert gen_u2 == 1
+        assert await get_cache_generation("user_2") == 1
+
+        # user_1 is still 2
+        assert await get_cache_generation("user_1") == 2
+

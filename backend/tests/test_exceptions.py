@@ -1,6 +1,5 @@
 """Tests for custom exception hierarchy."""
 
-import pytest
 from app.core.exceptions import (
     ProcessingError,
     DocumentTooLargeError,

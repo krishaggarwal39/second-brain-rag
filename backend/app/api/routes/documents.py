@@ -8,7 +8,7 @@ from app.core.auth import get_current_user
 from app.rag.vectorstore.chroma_store import delete_document, get_document_parents
 from app.rag.vectorstore.bm25_store import get_bm25_store
 from app.core.exceptions import DocumentTooLargeError
-from app.core.cache import get_cache, delete_cache
+from app.core.cache import get_cache, delete_cache, bump_cache_generation
 from app.core.rate_limit import limiter, UPLOAD_RATE_LIMIT, URL_RATE_LIMIT
 import structlog
 import asyncio
@@ -39,6 +39,7 @@ async def upload_document(
 
     job_id = str(uuid.uuid4())
     owner_id = str(user_id)
+    doc_id = f"{owner_id}:{uuid.uuid4()}"
 
     fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(safe_filename)[1])
     try:
@@ -73,8 +74,9 @@ async def upload_document(
         raise e
 
     from app.worker import process_file_task
-    process_file_task.delay(temp_path, safe_filename, file.content_type or "", job_id, owner_id)
-    return {"job_id": job_id, "status": "processing"}
+    process_file_task.delay(temp_path, safe_filename, file.content_type or "", job_id, owner_id, doc_id)
+    await bump_cache_generation(owner_id)
+    return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 
 
 @router.post("/url")
@@ -86,9 +88,11 @@ async def upload_url(
 ):
     job_id = str(uuid.uuid4())
     owner_id = str(user_id)
+    doc_id = f"{owner_id}:{uuid.uuid4()}"
     from app.worker import process_url_task
-    process_url_task.delay(str(body.url), job_id, owner_id)
-    return {"job_id": job_id, "status": "processing"}
+    process_url_task.delay(str(body.url), job_id, owner_id, doc_id)
+    await bump_cache_generation(owner_id)
+    return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 
 
 @router.get("")
@@ -128,13 +132,14 @@ async def delete_doc(
         )
 
     # Clean up parent chunks from Redis
-    parents = await get_document_parents(doc_id)
+    parents = await get_document_parents(doc_id, owner_id=owner_id)
     for p_id in parents:
         await delete_cache(f"parent:{p_id}")
         
     # Transactional safety is handled best-effort via execution ordering
-    await delete_document(doc_id)
-    await asyncio.to_thread(get_bm25_store().delete_documents_by_doc_id, doc_id)
+    await delete_document(doc_id, owner_id=owner_id)
+    await asyncio.to_thread(get_bm25_store().delete_documents_by_doc_id, doc_id, owner_id=owner_id)
     
     logger.info("Document deleted", doc_id=doc_id)
+    await bump_cache_generation(owner_id)
     return {"status": "deleted"}

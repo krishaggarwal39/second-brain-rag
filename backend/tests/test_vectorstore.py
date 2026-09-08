@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, MagicMock
 import chromadb
 
 from app.rag.vectorstore.chroma_store import add_documents, query, delete_document, list_documents, get_stats
@@ -46,6 +46,32 @@ async def test_chroma_store_cycle(mock_chroma_client):
     await delete_document("doc1")
     stats_after = get_stats()
     assert stats_after["total_chunks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_chroma_delete_document_with_owner_id(mock_chroma_client):
+    """Test delete_document with owner_id only deletes chunks of that owner."""
+    docs = ["User 1 doc", "User 2 doc"]
+    embeddings = [[0.1, 0.1], [0.2, 0.2]]
+    metadatas = [
+        {"hash": "h_u1", "doc_id": "shared_doc", "owner_id": "user1", "filename": "f.txt"},
+        {"hash": "h_u2", "doc_id": "shared_doc", "owner_id": "user2", "filename": "f.txt"},
+    ]
+    await add_documents(docs, embeddings, metadatas)
+    assert get_stats()["total_chunks"] == 2
+
+    # Deleting as user1 should delete only user1's chunk
+    await delete_document("shared_doc", owner_id="user1")
+    assert get_stats()["total_chunks"] == 1
+
+    # Remaining doc should belong to user2
+    remaining = await query([0.2, 0.2], n_results=5, score_threshold=0.0)
+    assert len(remaining) == 1
+    assert remaining[0]["metadata"]["owner_id"] == "user2"
+
+    # Clean up user2's doc
+    await delete_document("shared_doc", owner_id="user2")
+    assert get_stats()["total_chunks"] == 0
 
 @pytest.mark.asyncio
 async def test_local_embedder():
