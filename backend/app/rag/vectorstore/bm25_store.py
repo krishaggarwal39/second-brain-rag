@@ -240,44 +240,49 @@ class BM25Store:
         import re
         if not query.strip() or top_k <= 0:
             return []
-            
+
         words = [w for w in re.split(r'\W+', query) if w]
         if not words:
             return []
         safe_query = " OR ".join(words)
-        
+
+        # The single shared connection (check_same_thread=False) is NOT safe for
+        # concurrent read+write across threads — SQLite raises InterfaceError. Serialize
+        # reads under the same lock used for writes so the store is thread-safe when
+        # called via asyncio.to_thread from multiple concurrent requests.
         try:
-            if owner_id is not None:
-                cursor = self.conn.execute(
-                    """
-                    SELECT id, text, -bm25(corpus) as score 
-                    FROM corpus 
-                    WHERE corpus MATCH ? AND owner_id = ? 
-                    ORDER BY score DESC 
-                    LIMIT ?
-                    """, 
-                    (safe_query, str(owner_id), top_k)
-                )
-            else:
-                cursor = self.conn.execute(
-                    """
-                    SELECT id, text, -bm25(corpus) as score 
-                    FROM corpus 
-                    WHERE corpus MATCH ? 
-                    ORDER BY score DESC 
-                    LIMIT ?
-                    """, 
-                    (safe_query, top_k)
-                )
-            results = []
-            for row in cursor:
-                if row[2] > 0:
-                    results.append({"id": row[0], "text": row[1], "score": float(row[2])})
-            return results
+            with self._lock:
+                if owner_id is not None:
+                    cursor = self.conn.execute(
+                        """
+                        SELECT id, text, -bm25(corpus) as score
+                        FROM corpus
+                        WHERE corpus MATCH ? AND owner_id = ?
+                        ORDER BY score DESC
+                        LIMIT ?
+                        """,
+                        (safe_query, str(owner_id), top_k)
+                    )
+                else:
+                    cursor = self.conn.execute(
+                        """
+                        SELECT id, text, -bm25(corpus) as score
+                        FROM corpus
+                        WHERE corpus MATCH ?
+                        ORDER BY score DESC
+                        LIMIT ?
+                        """,
+                        (safe_query, top_k)
+                    )
+                results = []
+                for row in cursor:
+                    if row[2] > 0:
+                        results.append({"id": row[0], "text": row[1], "score": float(row[2])})
+                return results
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 query failed (likely syntax error with input string): {e}")
             return []
-            
+
     def get_total_docs(self) -> int:
         with self._lock:
             cursor = self.conn.execute("SELECT COUNT(*) FROM document_metadata")
