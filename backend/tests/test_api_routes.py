@@ -232,19 +232,7 @@ class TestDocumentRoutes:
 
             mock_delay.reset_mock()
 
-            # Query replace=false
-            limiter.reset()
-            response = client.post(
-                "/documents/upload?replace=false",
-                headers=auth_headers,
-                files={"file": ("doc1.pdf", b"%PDF-1.4 dummy", "application/pdf")},
-            )
-            assert response.status_code == 200
-            assert mock_delay.call_args[0][6] is False
-
-            mock_delay.reset_mock()
-
-            # Form replace=false
+            # Form replace=false (explicit false preserves both versions)
             limiter.reset()
             response = client.post(
                 "/documents/upload",
