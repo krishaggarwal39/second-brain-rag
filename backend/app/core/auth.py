@@ -277,7 +277,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     payload = _decode_token(credentials)
     try:
         user_id = int(payload["sub"])
-        _role = payload.get("role") or "user"
     except (KeyError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
