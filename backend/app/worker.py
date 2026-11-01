@@ -36,6 +36,7 @@ def process_file_task(
     job_id: str,
     owner_id: str = "",
     doc_id: Optional[str] = None,
+    replace: bool = True,
 ):
     from app.rag.ingestion import ingestion_pipeline
     try:
@@ -47,6 +48,7 @@ def process_file_task(
                 job_id=job_id,
                 owner_id=owner_id,
                 doc_id=doc_id,
+                replace=replace,
             )
         )
     except Exception as exc:
@@ -59,6 +61,7 @@ def process_url_task(
     job_id: str,
     owner_id: str = "",
     doc_id: Optional[str] = None,
+    replace: bool = True,
 ):
     from app.rag.ingestion import ingestion_pipeline
     try:
@@ -68,6 +71,7 @@ def process_url_task(
                 job_id=job_id,
                 owner_id=owner_id,
                 doc_id=doc_id,
+                replace=replace,
             )
         )
     except Exception as exc:

@@ -15,8 +15,11 @@ def client():
          patch("app.core.cache.close_cache", new_callable=AsyncMock), \
          patch("app.rag.vectorstore.chroma_store.get_stats", return_value={"total_chunks": 10}):
         from app.main import app
+        from app.core.rate_limit import limiter
+        limiter.reset()
         with TestClient(app) as c:
             yield c
+        limiter.reset()
 
 
 @pytest.fixture
@@ -197,8 +200,49 @@ class TestDocumentRoutes:
             assert "doc_id" in data
             assert data["doc_id"].startswith("1:")
             mock_delay.assert_called_once_with(
-                "https://example.com/test", data["job_id"], "1", data["doc_id"]
+                "https://example.com/test", data["job_id"], "1", data["doc_id"], True
             )
+
+    def test_upload_url_with_replace_false(self, client, auth_headers):
+        with patch("app.worker.process_url_task.delay") as mock_delay:
+            response = client.post(
+                "/documents/url",
+                headers=auth_headers,
+                json={"url": "https://example.com/test", "replace": False},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            mock_delay.assert_called_once_with(
+                "https://example.com/test", data["job_id"], "1", data["doc_id"], False
+            )
+
+    def test_upload_file_with_replace_params(self, client, auth_headers):
+        from app.core.rate_limit import limiter
+        with patch("app.worker.process_file_task.delay") as mock_delay, \
+             patch("magic.from_file", return_value="application/pdf"):
+            # Default replace=True
+            limiter.reset()
+            response = client.post(
+                "/documents/upload",
+                headers=auth_headers,
+                files={"file": ("doc1.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+            )
+            assert response.status_code == 200
+            assert mock_delay.call_args[0][6] is True
+
+            mock_delay.reset_mock()
+
+            # Form replace=false (explicit false preserves both versions)
+            limiter.reset()
+            response = client.post(
+                "/documents/upload",
+                headers=auth_headers,
+                files={"file": ("doc1.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+                data={"replace": "false"},
+            )
+            assert response.status_code == 200
+            assert mock_delay.call_args[0][6] is False
+            limiter.reset()
 
     def test_delete_doc_other_owner_forbidden(self, client, auth_headers):
         with patch("app.api.routes.documents.get_bm25_store") as mock_bm25:
