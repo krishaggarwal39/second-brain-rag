@@ -9,6 +9,20 @@ on:
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: second_brain_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +53,7 @@ jobs:
           OTEL_ENABLED: "false"
           JWT_SECRET: ci-test-jwt-secret-key-not-for-production
           JWT_EXPIRY_MINUTES: "1440"
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/second_brain_test
         run: pytest --tb=short -q --cov --cov-config=.coveragerc --cov-report=term-missing --cov-report=xml
         working-directory: backend
 
