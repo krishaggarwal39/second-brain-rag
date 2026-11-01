@@ -1,6 +1,8 @@
 import os
+import time
 import asyncio
 import uuid
+import contextvars
 from typing import List, Dict, Optional
 
 import structlog
@@ -10,8 +12,23 @@ from app.rag.vectorstore.chroma_store import query as chroma_query, get_chunk_me
 from app.rag.embeddings.local_embedder import embed_documents
 from app.rag.vectorstore.bm25_store import get_bm25_store
 from app.core.cache import get_cache
+from app.core.telemetry import get_tracer
 
 logger = structlog.get_logger(__name__)
+
+# Per-call fine-grained retrieval timings (milliseconds). hybrid_search() sets this
+# on every call so callers (e.g. the latency eval harness) can read the sub-stage
+# breakdown of the most recent invocation in the current async context without
+# changing hybrid_search's return type. Timing-only; does not affect results.
+_last_hybrid_timings: contextvars.ContextVar[Optional[Dict[str, float]]] = contextvars.ContextVar(
+    "last_hybrid_timings", default=None
+)
+
+
+def get_last_hybrid_timings() -> Optional[Dict[str, float]]:
+    """Return the per-stage timing dict (ms) from the most recent hybrid_search
+    call in the current async context, or None if none has run."""
+    return _last_hybrid_timings.get()
 
 # --- Configuration ---
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -82,71 +99,107 @@ async def hybrid_search(
     """
     fetch_k = top_k * RETRIEVAL_MULTIPLIER
 
-    # 1. Dense search (ChromaDB) - scoped to owner_id if provided
-    dense_results: List[Dict] = []
-    embeddings = await embed_documents([query])
-    if embeddings:
-        filters = {"owner_id": str(owner_id)} if owner_id else None
-        dense_results = await chroma_query(
-            embeddings[0], n_results=fetch_k, score_threshold=0.0, filters=filters
+    # Fine-grained per-stage timings (ms). Recorded with time.perf_counter() around
+    # each stage, attached to the active OTEL span, and exposed via the module-level
+    # contextvar. Timing-only instrumentation — it does not change results.
+    timings: Dict[str, float] = {}
+    tracer = get_tracer("rag.hybrid_retriever")
+
+    with tracer.start_as_current_span("hybrid_search") as span:
+
+        def _finish(results: List[Dict]) -> List[Dict]:
+            """Attach timings to the span + contextvar, then return results unchanged."""
+            timings["total_ms"] = sum(
+                v for k, v in timings.items() if k.endswith("_ms") and k != "total_ms"
+            )
+            for key, val in timings.items():
+                span.set_attribute(f"hybrid.{key}", val)
+            _last_hybrid_timings.set(dict(timings))
+            return results
+
+        # 1. Dense search: query embedding + ChromaDB vector search.
+        dense_results: List[Dict] = []
+        _t = time.perf_counter()
+        embeddings = await embed_documents([query])
+        timings["embedding_ms"] = (time.perf_counter() - _t) * 1000
+
+        _t = time.perf_counter()
+        if embeddings:
+            filters = {"owner_id": str(owner_id)} if owner_id else None
+            dense_results = await chroma_query(
+                embeddings[0], n_results=fetch_k, score_threshold=0.0, filters=filters
+            )
+        timings["dense_ms"] = (time.perf_counter() - _t) * 1000
+
+        # 2. Sparse search (BM25) - owner-filtered at store level
+        _t = time.perf_counter()
+        bm25_store = get_bm25_store()
+        sparse_results = await asyncio.to_thread(
+            bm25_store.search, query, fetch_k, owner_id=owner_id
         )
+        timings["sparse_ms"] = (time.perf_counter() - _t) * 1000
 
-    # 2. Sparse search (BM25) - owner-filtered at store level
-    bm25_store = get_bm25_store()
-    sparse_results = await asyncio.to_thread(
-        bm25_store.search, query, fetch_k, owner_id=owner_id
-    )
+        # 3. RRF Fusion + metadata hydration + owner-isolation filter
+        _t = time.perf_counter()
+        fused_results = reciprocal_rank_fusion(dense_results, sparse_results)
 
-    # 3. RRF Fusion
-    fused_results = reciprocal_rank_fusion(dense_results, sparse_results)
+        # Hydrate metadata from Chroma for chunks missing metadata (e.g. from BM25 sparse search)
+        missing_ids = [doc["id"] for doc in fused_results if doc.get("id") and not doc.get("metadata")]
+        if missing_ids:
+            meta_map = await get_chunk_metadatas(missing_ids)
+            for doc in fused_results:
+                if not doc.get("metadata") and doc.get("id") in meta_map:
+                    doc["metadata"] = meta_map[doc["id"]]
 
-    # Hydrate metadata from Chroma for chunks missing metadata (e.g. from BM25 sparse search)
-    missing_ids = [doc["id"] for doc in fused_results if doc.get("id") and not doc.get("metadata")]
-    if missing_ids:
-        meta_map = await get_chunk_metadatas(missing_ids)
-        for doc in fused_results:
-            if not doc.get("metadata") and doc.get("id") in meta_map:
-                doc["metadata"] = meta_map[doc["id"]]
-
-    for doc in fused_results:
-        _copy_metadata_to_doc(doc)
-
-    # User isolation: restrict fused results to owner_id if specified (defense-in-depth).
-    if owner_id:
-        target_owner = str(owner_id)
-        fused_results = [
-            doc for doc in fused_results
-            if doc.get("metadata", {}).get("owner_id") == target_owner
-        ]
-
-    if not reranker or not fused_results:
         for doc in fused_results:
             _copy_metadata_to_doc(doc)
-        return fused_results[:top_k]
 
-    # 4. Reranking (Cross-Encoder) — CPU-bound, runs in thread pool
-    pairs = [[query, doc.get("text", "")] for doc in fused_results]
+        # User isolation: restrict fused results to owner_id if specified (defense-in-depth).
+        if owner_id:
+            target_owner = str(owner_id)
+            fused_results = [
+                doc for doc in fused_results
+                if doc.get("metadata", {}).get("owner_id") == target_owner
+            ]
+        timings["fusion_hydration_ms"] = (time.perf_counter() - _t) * 1000
 
-    try:
-        scores = await asyncio.to_thread(reranker.predict, pairs)
-        for doc, score in zip(fused_results, scores):
-            doc["rerank_score"] = float(score)
+        if not reranker or not fused_results:
+            timings["rerank_ms"] = 0.0
+            timings["parent_hydration_ms"] = 0.0
+            for doc in fused_results:
+                _copy_metadata_to_doc(doc)
+            return _finish(fused_results[:top_k])
+
+        # 4. Reranking (Cross-Encoder) — CPU-bound, runs in thread pool
+        pairs = [[query, doc.get("text", "")] for doc in fused_results]
+
+        try:
+            _t = time.perf_counter()
+            scores = await asyncio.to_thread(reranker.predict, pairs)
+            timings["rerank_ms"] = (time.perf_counter() - _t) * 1000
 
             # 5. Hydrate parent content from cache for prompt building
-            meta = doc.get("metadata", {})
-            parent_id = meta.get("parent_id")
-            if parent_id:
-                parent_text = await get_cache(f"parent:{parent_id}")
-                if parent_text:
-                    doc["parent_content"] = parent_text
-            _copy_metadata_to_doc(doc)
+            _t = time.perf_counter()
+            for doc, score in zip(fused_results, scores):
+                doc["rerank_score"] = float(score)
 
-        reranked_results = sorted(
-            fused_results, key=lambda x: x["rerank_score"], reverse=True
-        )
-        return reranked_results[:top_k]
-    except Exception as e:
-        logger.error(f"Reranking failed: {e}")
-        for doc in fused_results:
-            _copy_metadata_to_doc(doc)
-        return fused_results[:top_k]
+                meta = doc.get("metadata", {})
+                parent_id = meta.get("parent_id")
+                if parent_id:
+                    parent_text = await get_cache(f"parent:{parent_id}")
+                    if parent_text:
+                        doc["parent_content"] = parent_text
+                _copy_metadata_to_doc(doc)
+            timings["parent_hydration_ms"] = (time.perf_counter() - _t) * 1000
+
+            reranked_results = sorted(
+                fused_results, key=lambda x: x["rerank_score"], reverse=True
+            )
+            return _finish(reranked_results[:top_k])
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            timings.setdefault("rerank_ms", (time.perf_counter() - _t) * 1000)
+            timings.setdefault("parent_hydration_ms", 0.0)
+            for doc in fused_results:
+                _copy_metadata_to_doc(doc)
+            return _finish(fused_results[:top_k])

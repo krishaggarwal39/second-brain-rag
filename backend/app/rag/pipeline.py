@@ -52,8 +52,12 @@ class RAGPipeline:
             hybrid_task = asyncio.create_task(
                 hybrid_search(question, top_k=5, owner_id=owner_id)
             )
-            graph_task = asyncio.create_task(retrieve_graph_context(question))
-            hybrid_results, graph_context = await asyncio.gather(hybrid_task, graph_task)
+            if os.getenv("DISABLE_GRAPH", "0") == "1":
+                hybrid_results = await hybrid_task
+                graph_context = ""
+            else:
+                graph_task = asyncio.create_task(retrieve_graph_context(question))
+                hybrid_results, graph_context = await asyncio.gather(hybrid_task, graph_task)
 
             threshold = float(os.getenv("RERANK_THRESHOLD", "-5.0"))
             pruned_hybrid = prune_irrelevant_context(hybrid_results, threshold=threshold)

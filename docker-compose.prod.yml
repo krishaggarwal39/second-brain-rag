@@ -23,6 +23,23 @@ services:
       retries: 5
       start_period: 30s
 
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - rag_network
+    depends_on:
+      - neo4j
+      - redis
+      - chroma
+    volumes:
+      - bm25_data:/app/bm25_data
+
   frontend:
     build:
       context: ./frontend
