@@ -212,16 +212,26 @@ Key tuning parameters:
 
 ## Limitations & Future Work
 
-- **Single-node design**: The SQLite-based BM25 store requires single-worker Gunicorn. For horizontal scaling, replace with PostgreSQL FTS or Elasticsearch.
 - **Single-tenant**: Multi-key auth provides basic client separation but not full RBAC or user-scoped document isolation.
-- **No document versioning**: Re-uploading a document creates new chunks without removing old ones (delete first).
 - **Evaluation is retrieval-only**: The eval pipeline tests context quality but not end-to-end answer quality (would need LLM-as-Judge with API costs).
+
+### Scaling the sparse store
+
+The default SQLite FTS5 BM25 store uses file-level locking and must run with single-worker Gunicorn. A PostgreSQL full-text-search backend is also included for horizontal scaling across multiple workers. To enable it, set in your `.env`:
+
+```bash
+SPARSE_BACKEND=postgres
+DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/second_brain
+GUNICORN_WORKERS=4
+```
+
+The Docker Compose stack already provisions a `postgres` service. The Postgres store uses a `tsvector` GIN index with `websearch_to_tsquery` ranking and a fork-aware connection pool safe for multi-process Gunicorn.
 
 Potential improvements:
 - Role-based access control with JWT
 - Multi-modal document parsing (images, tables as structured data)
 - Streaming graph updates with change-data-capture
-- PostgreSQL replacement for BM25 to enable multi-worker scaling
+- Elasticsearch sparse backend for cross-node sharding
 
 ---
 
