@@ -1,7 +1,8 @@
 import os
 import uuid
 import tempfile
-from fastapi import APIRouter, UploadFile, File, Request, HTTPException, Depends, status
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, Request, HTTPException, Depends, status, Form, Query
 from pydantic import BaseModel, HttpUrl, Field
 from app.core.auth import get_current_user
 
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 
 class URLUploadRequest(BaseModel):
     url: HttpUrl = Field(..., max_length=2048)
+    replace: bool = True
 
 
 @router.post("/upload")
@@ -27,6 +29,8 @@ class URLUploadRequest(BaseModel):
 async def upload_document(
     request: Request,
     file: UploadFile = File(...),
+    replace: Optional[bool] = Query(None),
+    replace_form: Optional[bool] = Form(None, alias="replace"),
     user_id: int = Depends(get_current_user),
 ):
     max_size = int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024
@@ -73,8 +77,9 @@ async def upload_document(
             os.remove(temp_path)
         raise e
 
+    is_replace = True if replace is None and replace_form is None else (replace if replace is not None else replace_form)
     from app.worker import process_file_task
-    process_file_task.delay(temp_path, safe_filename, file.content_type or "", job_id, owner_id, doc_id)
+    process_file_task.delay(temp_path, safe_filename, file.content_type or "", job_id, owner_id, doc_id, is_replace)
     await bump_cache_generation(owner_id)
     return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 
@@ -90,7 +95,7 @@ async def upload_url(
     owner_id = str(user_id)
     doc_id = f"{owner_id}:{uuid.uuid4()}"
     from app.worker import process_url_task
-    process_url_task.delay(str(body.url), job_id, owner_id, doc_id)
+    process_url_task.delay(str(body.url), job_id, owner_id, doc_id, body.replace)
     await bump_cache_generation(owner_id)
     return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 

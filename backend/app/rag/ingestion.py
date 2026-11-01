@@ -10,10 +10,14 @@ from app.rag.loaders.docx_loader import load_docx
 from app.rag.loaders.web_loader import load_web
 from app.rag.chunkers.recursive_chunker import chunk_documents
 from app.rag.embeddings.local_embedder import embed_documents
-from app.rag.vectorstore.chroma_store import add_documents
+from app.rag.vectorstore.chroma_store import (
+    add_documents,
+    delete_document,
+    get_document_parents,
+)
 from app.rag.vectorstore.bm25_store import get_bm25_store
 from app.core.exceptions import UnsupportedFormatError, ProcessingError, DocumentTooLargeError
-from app.core.cache import set_cache, bump_cache_generation
+from app.core.cache import set_cache, delete_cache, bump_cache_generation
 
 logger = structlog.get_logger(__name__)
 
@@ -26,6 +30,7 @@ class IngestionPipeline:
         job_id: str,
         owner_id: Optional[str] = None,
         doc_id: Optional[str] = None,
+        replace: bool = True,
     ):
         await set_cache(f"job:{job_id}", "processing")
         if not doc_id:
@@ -53,6 +58,7 @@ class IngestionPipeline:
                 doc_id=doc_id,
                 filename=filename,
                 owner_id=owner_id,
+                replace=replace,
             )
 
             await set_cache(f"job:{job_id}", "completed")
@@ -78,6 +84,7 @@ class IngestionPipeline:
         job_id: str,
         owner_id: Optional[str] = None,
         doc_id: Optional[str] = None,
+        replace: bool = True,
     ):
         await set_cache(f"job:{job_id}", "processing")
         if not doc_id:
@@ -95,6 +102,7 @@ class IngestionPipeline:
                 doc_id=doc_id,
                 filename=url,
                 owner_id=owner_id,
+                replace=replace,
             )
             await set_cache(f"job:{job_id}", "completed")
             if owner_id:
@@ -114,6 +122,7 @@ class IngestionPipeline:
         owner_id: Optional[str] = None,
         filename: Optional[str] = None,
         source_id: Optional[str] = None,
+        replace: bool = True,
     ):
         if doc_id is None and source_id is not None:
             doc_id = source_id
@@ -139,6 +148,42 @@ class IngestionPipeline:
         embeddings = await embed_documents(texts)
         if not embeddings or len(embeddings) != len(texts):
             raise ProcessingError("embedding generation failed")
+
+        if replace and owner_id and filename:
+            old_docs = await asyncio.to_thread(
+                get_bm25_store().get_document_metadata, owner_id=str(owner_id)
+            )
+            if old_docs:
+                for old_doc in old_docs:
+                    if not isinstance(old_doc, dict):
+                        continue
+                    old_doc_id = old_doc.get("doc_id")
+                    if (
+                        old_doc.get("filename") == filename
+                        and old_doc_id
+                        and old_doc_id != doc_id
+                    ):
+                        logger.info(
+                            "Replacing old document version",
+                            filename=filename,
+                            old_doc_id=old_doc_id,
+                            new_doc_id=doc_id,
+                            owner_id=str(owner_id),
+                        )
+                        # (1) Clean up parent chunks from Redis
+                        parents = await get_document_parents(old_doc_id, owner_id=str(owner_id))
+                        for p_id in parents:
+                            await delete_cache(f"parent:{p_id}")
+
+                        # (2) Chroma delete_document
+                        await delete_document(old_doc_id, owner_id=str(owner_id))
+
+                        # (3) BM25 delete_documents_by_doc_id
+                        await asyncio.to_thread(
+                            get_bm25_store().delete_documents_by_doc_id,
+                            old_doc_id,
+                            owner_id=str(owner_id),
+                        )
 
         for p_id, p_text in parent_store.items():
             await set_cache(f"parent:{p_id}", p_text, ttl=None)
