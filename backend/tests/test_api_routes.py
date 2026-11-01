@@ -372,3 +372,130 @@ class TestAuthRoutes:
         })
         assert resp.status_code == 401
 
+    def test_register_and_login_with_admin_emails_yields_admin_role(self, client, monkeypatch):
+        import uuid
+        from jose import jwt
+        import app.core.auth as auth_mod
+        from app.core.auth import get_user_store
+
+        admin_email = f"admin_{uuid.uuid4()}@example.com"
+        monkeypatch.setenv("ADMIN_EMAILS", f"other@example.com,{admin_email}")
+
+        # Register
+        reg_resp = client.post("/auth/register", json={
+            "email": admin_email,
+            "password": "strongpassword123"
+        })
+        assert reg_resp.status_code == 200
+        token = reg_resp.json()["access_token"]
+        payload = jwt.decode(token, auth_mod.JWT_SECRET, algorithms=[auth_mod.JWT_ALGORITHM])
+        assert payload.get("role") == "admin"
+
+        # Verify role persisted in DB
+        store = get_user_store()
+        assert store.get_role(int(payload["sub"])) == "admin"
+
+        # Login
+        login_resp = client.post("/auth/login", json={
+            "email": admin_email,
+            "password": "strongpassword123"
+        })
+        assert login_resp.status_code == 200
+        login_token = login_resp.json()["access_token"]
+        login_payload = jwt.decode(login_token, auth_mod.JWT_SECRET, algorithms=[auth_mod.JWT_ALGORITHM])
+        assert login_payload.get("role") == "admin"
+
+    def test_register_and_login_with_normal_email_yields_user_role(self, client, monkeypatch):
+        import uuid
+        from jose import jwt
+        import app.core.auth as auth_mod
+        from app.core.auth import get_user_store
+
+        monkeypatch.setenv("ADMIN_EMAILS", "admin_only@example.com")
+        normal_email = f"normal_{uuid.uuid4()}@example.com"
+
+        # Register
+        reg_resp = client.post("/auth/register", json={
+            "email": normal_email,
+            "password": "strongpassword123"
+        })
+        assert reg_resp.status_code == 200
+        token = reg_resp.json()["access_token"]
+        payload = jwt.decode(token, auth_mod.JWT_SECRET, algorithms=[auth_mod.JWT_ALGORITHM])
+        assert payload.get("role") == "user"
+
+        # Verify role persisted in DB
+        store = get_user_store()
+        assert store.get_role(int(payload["sub"])) == "user"
+
+        # Login
+        login_resp = client.post("/auth/login", json={
+            "email": normal_email,
+            "password": "strongpassword123"
+        })
+        assert login_resp.status_code == 200
+        login_token = login_resp.json()["access_token"]
+        login_payload = jwt.decode(login_token, auth_mod.JWT_SECRET, algorithms=[auth_mod.JWT_ALGORITHM])
+        assert login_payload.get("role") == "user"
+
+
+class TestMetricsRbac:
+    """Verify RBAC protection on GET /metrics."""
+
+    def test_metrics_without_api_key_returns_403(self, client):
+        resp = client.get("/metrics")
+        assert resp.status_code == 403
+
+    def test_metrics_without_bearer_token_returns_401(self, client):
+        api_key = os.getenv("API_KEY", "test-api-key-12345")
+        resp = client.get("/metrics", headers={"X-API-Key": api_key})
+        assert resp.status_code == 401
+
+    def test_metrics_with_non_admin_jwt_returns_403(self, client, auth_headers):
+        resp = client.get("/metrics", headers=auth_headers)
+        assert resp.status_code == 403
+        assert "Insufficient permissions" in resp.json()["detail"]
+
+    def test_metrics_with_admin_jwt_returns_200(self, client):
+        from app.core.auth import create_access_token, get_user_store, pwd_context
+        from datetime import datetime, timezone
+
+        store = get_user_store()
+        admin_id = 9999
+        if not store.user_exists(admin_id):
+            with store._lock:
+                cur = store.conn.execute("SELECT id FROM users WHERE id = ?", (admin_id,))
+                if not cur.fetchone():
+                    hashed = pwd_context.hash("adminpassword123")
+                    store.conn.execute(
+                        "INSERT OR IGNORE INTO users (id, email, hashed_password, created_at, role) VALUES (?, ?, ?, ?, ?)",
+                        (admin_id, "admin_metrics@example.com", hashed, datetime.now(timezone.utc).isoformat(), "admin"),
+                    )
+                    store.conn.commit()
+        store.set_role(admin_id, "admin")
+        token = create_access_token(user_id=admin_id, role="admin")
+        api_key = os.getenv("API_KEY", "test-api-key-12345")
+
+        resp = client.get("/metrics", headers={
+            "X-API-Key": api_key,
+            "Authorization": f"Bearer {token}",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "total_documents" in data
+        assert "total_chunks" in data
+
+    def test_existing_non_admin_users_unaffected_on_documents_and_chat(self, client, auth_headers):
+        doc_resp = client.get("/documents", headers=auth_headers)
+        assert doc_resp.status_code == 200
+
+        with patch("app.api.routes.chat.pipeline") as mock_pipeline:
+            mock_pipeline.ask = AsyncMock(return_value={"answer": "hello", "citations": []})
+            chat_resp = client.post(
+                "/chat",
+                headers=auth_headers,
+                json={"question": "hello there"},
+            )
+            assert chat_resp.status_code == 200
+            assert chat_resp.json()["answer"] == "hello"
+

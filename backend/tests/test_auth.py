@@ -1,7 +1,10 @@
 import importlib
 import os
+import sqlite3
+from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import patch
+from jose import jwt
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -11,6 +14,15 @@ from app.core.auth import (
     validate_jwt_secret,
     create_access_token,
     get_current_user,
+    get_current_role,
+    require_role,
+    resolve_role,
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+requires_postgres = pytest.mark.skipif(
+    not DATABASE_URL,
+    reason="DATABASE_URL environment variable is not set (PostgreSQL tests skipped)",
 )
 
 
@@ -240,4 +252,170 @@ class TestUserStoreBackendSelection:
             with patch.object(auth.pwd_context, "dummy_verify", wraps=auth.pwd_context.dummy_verify) as mock_dummy:
                 assert pg_store.authenticate("missing@example.com", "any") is None
                 mock_dummy.assert_called_once()
+
+            # get_role
+            mock_cursor.fetchone.return_value = ("admin",)
+            assert pg_store.get_role(42) == "admin"
+            mock_cursor.fetchone.return_value = None
+            assert pg_store.get_role(42) == "user"
+
+            # set_role
+            pg_store.set_role(42, "admin")
+            mock_cursor.execute.assert_called_with("UPDATE users SET role = %s WHERE id = %s", ("admin", 42))
+            assert mock_conn.commit.called
+
+
+class TestRoleColumnAndStore:
+    """Verify role column in UserStore and PostgresUserStore with guarded migrations."""
+
+    def test_sqlite_role_column_exists_and_defaults_to_user(self):
+        store = get_user_store()
+        email = f"role_test_{os.urandom(4).hex()}@example.com"
+        uid = store.create_user(email, "password123")
+        assert store.get_role(uid) == "user"
+
+        with store._lock:
+            cur = store.conn.execute("SELECT role FROM users WHERE id = ?", (uid,))
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] == "user"
+
+    def test_sqlite_guarded_migration_adds_missing_role_column(self, tmp_path, monkeypatch):
+        test_db = str(tmp_path / "legacy_users.db")
+        conn = sqlite3.connect(test_db)
+        conn.execute("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                hashed_password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO users (email, hashed_password, created_at) VALUES (?, ?, ?)",
+            ("legacy@example.com", "fakehash", "2026-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(auth, "AUTH_DB_PATH", test_db)
+        legacy_store = auth.UserStore()
+        cursor = legacy_store.conn.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in cursor.fetchall()]
+        assert "role" in columns
+        assert legacy_store.get_role(1) == "user"
+
+    def test_sqlite_set_role(self):
+        store = get_user_store()
+        email = f"role_set_{os.urandom(4).hex()}@example.com"
+        uid = store.create_user(email, "password123")
+        assert store.get_role(uid) == "user"
+
+        store.set_role(uid, "admin")
+        assert store.get_role(uid) == "admin"
+
+    def test_sqlite_get_role_nonexistent_user(self):
+        store = get_user_store()
+        assert store.get_role(99999999) == "user"
+
+    @requires_postgres
+    def test_postgres_role_column_live(self):
+        pg_store = auth.PostgresUserStore(database_url=DATABASE_URL)
+        email = f"pg_role_{os.urandom(4).hex()}@example.com"
+        uid = pg_store.create_user(email, "password123")
+        try:
+            assert pg_store.get_role(uid) == "user"
+            pg_store.set_role(uid, "admin")
+            assert pg_store.get_role(uid) == "admin"
+        finally:
+            with pg_store._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM users WHERE id = %s", (uid,))
+                conn.commit()
+
+
+class TestResolveRole:
+    """Verify resolve_role reads ADMIN_EMAILS env var correctly."""
+
+    def test_resolve_role_returns_admin_for_listed_emails(self, monkeypatch):
+        monkeypatch.setenv("ADMIN_EMAILS", "admin@example.com, super@test.com, ROOT@MYDOMAIN.ORG")
+        assert resolve_role("admin@example.com") == "admin"
+        assert resolve_role("ADMIN@EXAMPLE.COM") == "admin"
+        assert resolve_role(" super@test.com ") == "admin"
+        assert resolve_role("root@mydomain.org") == "admin"
+
+    def test_resolve_role_returns_user_for_unlisted_or_empty(self, monkeypatch):
+        monkeypatch.setenv("ADMIN_EMAILS", "admin@example.com")
+        assert resolve_role("other@example.com") == "user"
+        assert resolve_role("") == "user"
+
+    def test_resolve_role_defaults_to_user_when_unset(self, monkeypatch):
+        monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+        assert resolve_role("admin@example.com") == "user"
+
+
+class TestJwtRoleClaimAndBackwardCompat:
+    """Verify role claim in JWT, token creation, and backward compatibility."""
+
+    def test_create_access_token_default_and_custom_role(self):
+        token_default = create_access_token(1)
+        payload_default = jwt.decode(token_default, auth.JWT_SECRET, algorithms=[auth.JWT_ALGORITHM])
+        assert payload_default["role"] == "user"
+
+        token_admin = create_access_token(1, role="admin")
+        payload_admin = jwt.decode(token_admin, auth.JWT_SECRET, algorithms=[auth.JWT_ALGORITHM])
+        assert payload_admin["role"] == "admin"
+
+    @pytest.mark.asyncio
+    async def test_old_style_token_without_role_claim_resolves_to_user(self):
+        store = get_user_store()
+        email = f"compat_{os.urandom(4).hex()}@example.com"
+        uid = store.create_user(email, "password123")
+
+        # Mint token manually with NO 'role' claim in payload
+        expire = datetime.now(timezone.utc) + timedelta(minutes=60)
+        token = jwt.encode({"sub": str(uid), "exp": expire}, auth.JWT_SECRET, algorithm=auth.JWT_ALGORITHM)
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+        assert await get_current_role(creds) == "user"
+        assert await get_current_user(creds) == uid
+
+    @pytest.mark.asyncio
+    async def test_get_current_role_with_role_claim(self):
+        token = create_access_token(42, role="admin")
+        creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        assert await get_current_role(creds) == "admin"
+
+    @pytest.mark.asyncio
+    async def test_get_current_role_missing_creds_raises_401(self):
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_role(None)
+        assert exc_info.value.status_code == 401
+        assert "Authentication required" in exc_info.value.detail
+
+
+class TestRequireRoleDependency:
+    """Verify require_role dependency enforcement."""
+
+    @pytest.mark.asyncio
+    async def test_require_role_allows_authorized_role(self):
+        checker = require_role("admin")
+        res = await checker(user_id=10, role="admin")
+        assert res == 10
+
+    @pytest.mark.asyncio
+    async def test_require_role_blocks_unauthorized_role(self):
+        checker = require_role("admin")
+        with pytest.raises(HTTPException) as exc_info:
+            await checker(user_id=10, role="user")
+        assert exc_info.value.status_code == 403
+        assert "Insufficient permissions" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_require_role_multiple_allowed_roles(self):
+        checker = require_role("admin", "editor")
+        assert await checker(user_id=10, role="editor") == 10
+        with pytest.raises(HTTPException) as exc_info:
+            await checker(user_id=10, role="viewer")
+        assert exc_info.value.status_code == 403
 
