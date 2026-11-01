@@ -17,6 +17,7 @@ from app.core.logging import setup_logging
 from app.core.cache import init_cache, close_cache, increment_metric
 from app.core.rate_limit import limiter
 from app.core.telemetry import init_telemetry
+from app.core.auth import require_role
 
 # Initialize structlog first
 setup_logging()
@@ -148,7 +149,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(health.router)
 app.include_router(auth.router)
-app.include_router(metrics.router, dependencies=[Depends(verify_api_key)])
+app.include_router(metrics.router, dependencies=[Depends(verify_api_key), Depends(require_role("admin"))])
 app.include_router(documents.router, dependencies=[Depends(verify_api_key)])
 app.include_router(chat.router, dependencies=[Depends(verify_api_key)])
 

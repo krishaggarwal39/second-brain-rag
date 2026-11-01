@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
-from app.core.auth import get_user_store, create_access_token
+from app.core.auth import get_user_store, create_access_token, resolve_role
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -23,7 +23,9 @@ async def register(body: RegisterRequest):
         user_id = store.create_user(body.email, body.password)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-    token = create_access_token(user_id)
+    role = resolve_role(body.email)
+    store.set_role(user_id, role)
+    token = create_access_token(user_id, role=role)
     return TokenResponse(access_token=token)
 
 @router.post("/login", response_model=TokenResponse)
@@ -32,5 +34,7 @@ async def login(body: LoginRequest):
     user_id = store.authenticate(body.email, body.password)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-    token = create_access_token(user_id)
+    role = resolve_role(body.email)
+    store.set_role(user_id, role)
+    token = create_access_token(user_id, role=role)
     return TokenResponse(access_token=token)

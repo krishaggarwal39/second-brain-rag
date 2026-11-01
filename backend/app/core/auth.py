@@ -50,9 +50,15 @@ class UserStore:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT UNIQUE NOT NULL,
                 hashed_password TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
             )
         """)
+        # Guarded migration: ensure role column exists on users
+        cursor = self.conn.execute("PRAGMA table_info(users);")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "role" not in columns:
+            self.conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
         self.conn.commit()
         self._lock = threading.Lock()
 
@@ -61,13 +67,13 @@ class UserStore:
             cursor = self.conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,))
             return cursor.fetchone() is not None
 
-    def create_user(self, email: str, password: str) -> int:
+    def create_user(self, email: str, password: str, role: str = "user") -> int:
         hashed = pwd_context.hash(password)
         with self._lock:
             try:
                 cursor = self.conn.execute(
-                    "INSERT INTO users (email, hashed_password, created_at) VALUES (?, ?, ?)",
-                    (email, hashed, datetime.now(timezone.utc).isoformat())
+                    "INSERT INTO users (email, hashed_password, created_at, role) VALUES (?, ?, ?, ?)",
+                    (email, hashed, datetime.now(timezone.utc).isoformat(), role)
                 )
                 self.conn.commit()
                 return cursor.lastrowid
@@ -87,6 +93,17 @@ class UserStore:
         if not pwd_context.verify(password, row[1]):
             return None
         return row[0]
+
+    def get_role(self, user_id: int) -> str:
+        with self._lock:
+            cursor = self.conn.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else "user"
+
+    def set_role(self, user_id: int, role: str) -> None:
+        with self._lock:
+            self.conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+            self.conn.commit()
 
 
 SQLiteUserStore = UserStore
@@ -139,9 +156,18 @@ class PostgresUserStore:
                         id SERIAL PRIMARY KEY,
                         email TEXT UNIQUE NOT NULL,
                         hashed_password TEXT NOT NULL,
-                        created_at TEXT NOT NULL
+                        created_at TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'user'
                     );
                 """)
+                # Guarded migration: ensure role column exists on users
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'users';
+                """)
+                user_cols = {row[0] for row in cur.fetchall()}
+                if user_cols and "role" not in user_cols:
+                    cur.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
             conn.commit()
 
     def user_exists(self, user_id: int) -> bool:
@@ -150,14 +176,14 @@ class PostgresUserStore:
                 cur.execute("SELECT 1 FROM users WHERE id = %s", (user_id,))
                 return cur.fetchone() is not None
 
-    def create_user(self, email: str, password: str) -> int:
+    def create_user(self, email: str, password: str, role: str = "user") -> int:
         hashed = pwd_context.hash(password)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 try:
                     cur.execute(
-                        "INSERT INTO users (email, hashed_password, created_at) VALUES (%s, %s, %s) RETURNING id;",
-                        (email, hashed, datetime.now(timezone.utc).isoformat()),
+                        "INSERT INTO users (email, hashed_password, created_at, role) VALUES (%s, %s, %s, %s) RETURNING id;",
+                        (email, hashed, datetime.now(timezone.utc).isoformat(), role),
                     )
                     user_id = cur.fetchone()[0]
                     conn.commit()
@@ -180,6 +206,19 @@ class PostgresUserStore:
         if not pwd_context.verify(password, row[1]):
             return None
         return row[0]
+
+    def get_role(self, user_id: int) -> str:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+                row = cur.fetchone()
+                return row[0] if row and row[0] else "user"
+
+    def set_role(self, user_id: int, role: str) -> None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
+            conn.commit()
 
 
 _user_store: UserStore | PostgresUserStore | None = None
@@ -208,19 +247,37 @@ def reset_user_store() -> None:
     _user_store = None
     _current_backend = None
 
-def create_access_token(user_id: int) -> str:
+
+def resolve_role(email: str) -> str:
+    """Resolve role for an email address against ADMIN_EMAILS environment variable."""
+    admin_emails_raw = os.getenv("ADMIN_EMAILS", "")
+    if not admin_emails_raw or not email:
+        return "user"
+    admin_emails = {e.strip().lower() for e in admin_emails_raw.split(",") if e.strip()}
+    return "admin" if email.strip().lower() in admin_emails else "user"
+
+
+def create_access_token(user_id: int, role: str = "user") -> str:
     validate_jwt_secret(JWT_SECRET)
     expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRY_MINUTES)
-    payload = {"sub": str(user_id), "exp": expire}
+    payload = {"sub": str(user_id), "role": role, "exp": expire}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
+
+def _decode_token(credentials: HTTPAuthorizationCredentials | None) -> dict:
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = int(payload["sub"])
+        return jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> int:
+    payload = _decode_token(credentials)
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     store = get_user_store()
@@ -228,3 +285,24 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return user_id
+
+
+async def get_current_role(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    payload = _decode_token(credentials)
+    return payload.get("role") or "user"
+
+
+def require_role(*allowed: str):
+    async def role_checker(
+        user_id: int = Depends(get_current_user),
+        role: str = Depends(get_current_role),
+    ) -> int:
+        allowed_roles = {r.lower() for r in allowed}
+        if role.lower() not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions",
+            )
+        return user_id
+
+    return role_checker
