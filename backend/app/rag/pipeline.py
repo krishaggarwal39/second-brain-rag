@@ -224,6 +224,10 @@ class RAGPipeline:
                 async with httpx.AsyncClient() as client:
                     response = await client.post(url, headers=headers, json=payload, timeout=60.0)
                     if response.status_code == 429:
+                        # On Gemini 429, rotate to the next Gemini key before failing over.
+                        if provider == "gemini" and llm_manager.rotate_gemini_key():
+                            logger.warning(f"ask 429 on attempt {attempt + 1}, rotated Gemini key")
+                            continue
                         llm_manager.switch_to_fallback(provider)
                         if attempt < max_retries - 1:
                             wait = 2 ** attempt
@@ -343,6 +347,9 @@ class RAGPipeline:
                     async with httpx.AsyncClient() as client:
                         async with client.stream("POST", url, headers=headers, json=payload, timeout=60.0) as response:
                             if response.status_code == 429:
+                                if provider == "gemini" and llm_manager.rotate_gemini_key():
+                                    logger.warning(f"Stream 429 on attempt {attempt + 1}, rotated Gemini key")
+                                    continue
                                 llm_manager.switch_to_fallback(provider)
                                 if attempt < max_retries - 1:
                                     wait = 2 ** attempt
@@ -385,6 +392,9 @@ class RAGPipeline:
 
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 429 and attempt < max_retries - 1:
+                        if provider == "gemini" and llm_manager.rotate_gemini_key():
+                            logger.warning(f"Stream HTTPStatusError 429 on attempt {attempt + 1}, rotated Gemini key")
+                            continue
                         llm_manager.switch_to_fallback(provider)
                         wait = 2 ** attempt
                         logger.warning(f"Stream HTTPStatusError 429 on attempt {attempt + 1}, waiting {wait}s")

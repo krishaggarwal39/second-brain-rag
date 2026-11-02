@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import uuid
@@ -34,6 +35,8 @@ def get_last_hybrid_timings() -> Optional[Dict[str, float]]:
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RRF_K = int(os.getenv("RRF_K", "60"))
 RETRIEVAL_MULTIPLIER = int(os.getenv("RETRIEVAL_MULTIPLIER", "3"))
+USE_MMR = os.getenv("USE_MMR", "1")
+MMR_LAMBDA = float(os.getenv("MMR_LAMBDA", "0.7"))
 
 # Load local cross-encoder for reranking (lazy-safe: if model download fails, reranking is skipped).
 try:
@@ -83,6 +86,78 @@ def _copy_metadata_to_doc(doc: Dict) -> None:
         page_num = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
         if page_num is not None:
             doc["page_number"] = page_num
+
+
+def _token_jaccard_similarity(tokens_a: set, tokens_b: set) -> float:
+    """Calculate token Jaccard similarity between two sets of tokens."""
+    if not tokens_a and not tokens_b:
+        return 1.0
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    return intersection / union if union > 0 else 0.0
+
+
+def _mmr_select(
+    candidates: List[Dict],
+    top_k: int,
+    mmr_lambda: float = 0.7,
+) -> List[Dict]:
+    """Select top_k diverse candidates using Maximal Marginal Relevance (MMR).
+
+    Greedy MMR:
+      1. Start from the highest-relevance candidate.
+      2. Iteratively pick candidate maximizing:
+           score = lambda * norm_relevance(c) - (1 - lambda) * max(similarity(c, s) for s in already_selected)
+      3. Stop at top_k candidates.
+    Lexical similarity is computed via token Jaccard similarity on lowercased word sets.
+    """
+    if not candidates or top_k <= 0:
+        return []
+    if len(candidates) <= 1 or top_k == 1:
+        return candidates[:top_k]
+
+    token_sets = [
+        set(re.findall(r"\w+", (doc.get("text") or "").lower()))
+        for doc in candidates
+    ]
+    scores = [float(doc.get("rerank_score", 0.0)) for doc in candidates]
+    min_score = min(scores)
+    max_score = max(scores)
+    score_range = max_score - min_score
+
+    if score_range > 1e-9:
+        norm_scores = [(s - min_score) / score_range for s in scores]
+    else:
+        norm_scores = [1.0 for _ in scores]
+
+    selected_indices: List[int] = [0]
+    remaining_indices = list(range(1, len(candidates)))
+    target_count = min(top_k, len(candidates))
+
+    while len(selected_indices) < target_count and remaining_indices:
+        best_idx = None
+        best_mmr_score = -float("inf")
+
+        for idx in remaining_indices:
+            cand_tokens = token_sets[idx]
+            max_sim = max(
+                _token_jaccard_similarity(cand_tokens, token_sets[s_idx])
+                for s_idx in selected_indices
+            )
+            mmr_score = mmr_lambda * norm_scores[idx] - (1.0 - mmr_lambda) * max_sim
+            if mmr_score > best_mmr_score:
+                best_mmr_score = mmr_score
+                best_idx = idx
+
+        if best_idx is None:
+            best_idx = remaining_indices[0]
+
+        selected_indices.append(best_idx)
+        remaining_indices.remove(best_idx)
+
+    return [candidates[i] for i in selected_indices]
 
 
 async def hybrid_search(
@@ -166,6 +241,7 @@ async def hybrid_search(
         if not reranker or not fused_results:
             timings["rerank_ms"] = 0.0
             timings["parent_hydration_ms"] = 0.0
+            timings["mmr_ms"] = 0.0
             for doc in fused_results:
                 _copy_metadata_to_doc(doc)
             return _finish(fused_results[:top_k])
@@ -195,11 +271,36 @@ async def hybrid_search(
             reranked_results = sorted(
                 fused_results, key=lambda x: x["rerank_score"], reverse=True
             )
-            return _finish(reranked_results[:top_k])
+
+            # 6. MMR (Maximal Marginal Relevance) diversity selection
+            use_mmr = os.getenv("USE_MMR", "1").strip().lower() not in ("0", "false", "no")
+            try:
+                mmr_lambda = float(os.getenv("MMR_LAMBDA", "0.7"))
+            except ValueError:
+                mmr_lambda = 0.7
+
+            if not use_mmr:
+                timings["mmr_ms"] = 0.0
+                return _finish(reranked_results[:top_k])
+
+            _t = time.perf_counter()
+            try:
+                selected_results = _mmr_select(
+                    candidates=reranked_results,
+                    top_k=top_k,
+                    mmr_lambda=mmr_lambda,
+                )
+                timings["mmr_ms"] = (time.perf_counter() - _t) * 1000
+                return _finish(selected_results)
+            except Exception as e:
+                logger.error(f"MMR selection failed, falling back to sorted top_k: {e}")
+                timings["mmr_ms"] = (time.perf_counter() - _t) * 1000
+                return _finish(reranked_results[:top_k])
         except Exception as e:
             logger.error(f"Reranking failed: {e}")
             timings.setdefault("rerank_ms", (time.perf_counter() - _t) * 1000)
             timings.setdefault("parent_hydration_ms", 0.0)
+            timings.setdefault("mmr_ms", 0.0)
             for doc in fused_results:
                 _copy_metadata_to_doc(doc)
             return _finish(fused_results[:top_k])

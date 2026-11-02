@@ -30,16 +30,41 @@ class LLMManager:
         self.last_fallback_time = 0
         self.cooldown_seconds = int(os.getenv("LLM_COOLDOWN_SECONDS", "300"))
 
-        self.gemini_key = os.getenv("GOOGLE_API_KEY", "")
+        # GOOGLE_API_KEY may be a comma-separated list of keys (different accounts)
+        # for quota rotation. On a 429 we advance to the next key before failing over
+        # to the Groq provider. Backward compatible with a single key.
+        self.gemini_keys = [k.strip() for k in os.getenv("GOOGLE_API_KEY", "").split(",") if k.strip()]
+        self._gemini_key_idx = 0
         self.groq_key = os.getenv("GROQ_API_KEY", "")
 
         self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-        if not self.gemini_key:
+        if not self.gemini_keys:
             logger.warning("GOOGLE_API_KEY is not set.")
+        else:
+            logger.info(f"Loaded {len(self.gemini_keys)} Gemini API key(s) for rotation.")
         if not self.groq_key:
             logger.warning("GROQ_API_KEY is not set.")
+
+    @property
+    def gemini_key(self) -> str:
+        """Current active Gemini key (first of the rotation list)."""
+        return self.gemini_keys[self._gemini_key_idx] if self.gemini_keys else ""
+
+    def rotate_gemini_key(self) -> bool:
+        """Advance to the next Gemini key. Returns True if another key is available,
+        False if all keys have been exhausted (caller should then fail over to Groq."""
+        with self._lock:
+            if self._gemini_key_idx < len(self.gemini_keys) - 1:
+                self._gemini_key_idx += 1
+                logger.warning(
+                    f"Gemini key rate-limited; rotating to key "
+                    f"{self._gemini_key_idx + 1}/{len(self.gemini_keys)}"
+                )
+                return True
+            logger.warning("All Gemini keys exhausted; no more keys to rotate to.")
+            return False
 
     def get_active_provider(self) -> str:
         with self._lock:
@@ -182,6 +207,10 @@ class LLMManager:
                     )
 
                     if response.status_code == 429:
+                        # On Gemini 429, first try the next Gemini key (rotation);
+                        # only fail over to Groq once all Gemini keys are exhausted.
+                        if provider == "gemini" and self.rotate_gemini_key():
+                            continue
                         self.switch_to_fallback(provider)
                         if attempt < max_retries - 1:
                             await asyncio.sleep(2 ** attempt)

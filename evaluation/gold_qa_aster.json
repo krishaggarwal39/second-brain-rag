@@ -1,0 +1,191 @@
+[
+  {
+    "id": "a01",
+    "question": "What was Aster Loop's committed runway at incorporation, and how much of it came from Mira's consulting income?",
+    "reference_answer": "Aster Loop had Rs 8.4 lakh of committed runway at incorporation, including Rs 2.1 lakh that Mira had set aside from consulting income.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a02",
+    "question": "What retention policy did the team finally agree to for Northstar's uploaded documents?",
+    "reference_answer": "Ninety days for raw uploaded files in the pilot workspace (unless a file was explicitly pinned for longer), and three hundred sixty-five days for derived audit metadata. The final rule appeared in the security addendum dated 14 May.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a03",
+    "question": "When did the Northstar pilot implementation actually begin?",
+    "reference_answer": "The implementation actually began on 22 April, not 8 April as the original proposal suggested; the start had moved after procurement delayed vendor onboarding.",
+    "source_doc": "aster_loop.pdf",
+    "category": "superseded"
+  },
+  {
+    "id": "a04",
+    "question": "What was the corrected hybrid retrieval accuracy figure, and what incorrect number had it replaced?",
+    "reference_answer": "The corrected figure was 89.3 percent supported recall at five, recomputed on 180 unique questions. It replaced an incorrect 91.3 percent that resulted from twenty evaluation questions being accidentally duplicated during a CSV merge.",
+    "source_doc": "aster_loop.pdf",
+    "category": "superseded"
+  },
+  {
+    "id": "a05",
+    "question": "How did the internal retrieval evaluation recall improve across the stages of chunking, adding BM25, and reranking?",
+    "reference_answer": "On the internal 180-question evaluation set, answer-supported recall at five passages rose from 71.6 percent to 79.8 percent with structure-aware chunking, then to 84.1 percent after adding BM25 alongside dense retrieval, and reached 89.3 percent in the final April configuration with the cross-encoder reranker.",
+    "source_doc": "aster_loop.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "a06",
+    "question": "What were the parameters of the first fixed chunking approach, and what replaced it?",
+    "reference_answer": "The first ingestion pipeline split text every 800 tokens with a 120-token overlap. In March it was replaced with structure-aware segmentation (headings opening semantic sections, list items kept with their introductory sentence, tables serialized with repeated column labels), with a hard ceiling of 1,400 tokens.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a07",
+    "question": "How did the Northstar pilot's scope and value change between the initial proposal and the signed order form?",
+    "reference_answer": "It entered as a document-search pilot worth Rs 3.6 lakh for twelve weeks, and by the signed order form on 18 April the scope had changed to Rs 4.2 lakh, fourteen weeks, with a requirement for audit trails on every generated answer.",
+    "source_doc": "aster_loop.pdf",
+    "category": "superseded"
+  },
+  {
+    "id": "a08",
+    "question": "What source hierarchy did Arjun introduce for resolving conflicting evidence?",
+    "reference_answer": "Signed agreements ranked above proposals; explicit amendments ranked above the agreements they modified; customer confirmations outranked internal notes for customer-owned facts; and implementation records outranked planning documents for observed system state. The hierarchy was not universal (e.g. finance facts treated bank exports as more authoritative than manual budget sheets).",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a09",
+    "question": "What are the four timestamp clocks every ingested object acquired?",
+    "reference_answer": "Every ingested object acquired four clocks: created_at, effective_from, effective_until and observed_at.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a10",
+    "question": "In the default retrieval pipeline for ordinary questions, how many candidates were retrieved, how many went to the reranker, and how many passages reached the generation context?",
+    "reference_answer": "The pipeline retrieved forty candidates, applied authority and temporal features, sent twelve to the reranker, and normally six passages reached the generation context.",
+    "source_doc": "aster_loop.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "a11",
+    "question": "What triggered the 7 June queue incident and how did Dev fix it?",
+    "reference_answer": "A customer imported a folder of 2,846 files, many scanned PDFs, and OCR jobs occupied every worker, starving ordinary text documents. Dev split OCR into a separate queue and added weighted worker reservations, guaranteeing ordinary text sixty percent of ingestion capacity while OCR could borrow unused slots.",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a12",
+    "question": "Why did Aster Loop's infrastructure cost fall from June to August despite higher document volume?",
+    "reference_answer": "A bug had caused some unchanged PDFs to be re-embedded when only metadata changed. Content-addressed hashing introduced on 19 June reduced duplicate embedding calls by 31 percent, so despite higher document volume monthly spend fell from the June bill of Rs 1.74 lakh to Rs 1.49 lakh by August.",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a13",
+    "question": "Why did BluePeak Logistics decline the pilot, and how did Aster Loop change its positioning afterward?",
+    "reference_answer": "BluePeak's CIO declined on 2 July, saying the product was impressive but difficult to categorize, since search was already in their collaboration suite and a generic AI assistant did not justify a new vendor review. Aster Loop shifted positioning from 'AI search for company knowledge' to 'the evidence layer for changing operational knowledge,' changing the website on 11 July.",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a14",
+    "question": "What security defect did Sana Iqbal's permissions work uncover?",
+    "reference_answer": "She found three cases where a user could see the title of a restricted document in search suggestions even though opening the document was correctly blocked. No document content leaked, but the metadata exposure was treated as a security defect and fixed before her third week.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a15",
+    "question": "What was Aster Loop's original seat-based price, and what was the workspace plan it tested in August?",
+    "reference_answer": "The original price was Rs 1,200 per user per month with a twenty-user minimum. In August it tested a workspace plan of Rs 32,000 per month including twenty-five active users, 250,000 indexed pages and 12,000 answer generations, with additional indexed pages priced in blocks and viewer-only accounts free.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a16",
+    "question": "What shipped in version 1.8, and what connector was deferred?",
+    "reference_answer": "Version 1.8 went live on 9 September with evidence confidence labels, document-lineage views, saved research threads, and an administrator report for unanswered questions. Slack ingestion was deferred (formally on 28 August) because channel-level permissions and historical membership were more complicated than estimated; instead the team completed Google Drive incremental sync.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a17",
+    "question": "What caused the October citation defect (INC-2026-10-14) and what was the permanent fix?",
+    "reference_answer": "An answer's wording was correct but its citation opened the wrong revision of a policy: both revisions were in context and the citation mapper attached the older chunk because both chunks shared a normalized sentence hash. The permanent fix assigned citation identity to document revision plus chunk offset rather than normalized sentence text.",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a18",
+    "question": "In the October citation incident, what were the mitigation time and the patch deployment time?",
+    "reference_answer": "The team disabled sentence-hash citation collapsing at 16:40 IST (mitigation) and deployed the patch at 19:12. A subsequent audit found eleven affected answers across four workspaces over the previous nine days.",
+    "source_doc": "aster_loop.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "a19",
+    "question": "How does research mode differ from ordinary question answering in its retrieval contract?",
+    "reference_answer": "Research mode decomposes a question into sub-questions, retrieves independently for each, merges evidence by source identity, and constructs a working outline before drafting. It can inspect up to sixty candidate passages but caps the final evidence set at eighteen unless the user explicitly expands a section, whereas ordinary answering used forty candidates, twelve to the reranker and six passages.",
+    "source_doc": "aster_loop.pdf",
+    "category": "comparison"
+  },
+  {
+    "id": "a20",
+    "question": "What were the terms of the September angel round, and what was the cash position on 31 October?",
+    "reference_answer": "The founders closed a Rs 24 lakh angel round in September using a simple agreement for future equity with a Rs 6 crore valuation cap and no discount. By 31 October, cash in the operating account was Rs 18.7 lakh.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a21",
+    "question": "How did the product change the way it answered whether something was prohibited, after the open-source embedding models question?",
+    "reference_answer": "After a user asked whether Northstar had prohibited open-source embedding models, early versions answered 'No,' but Daniel pointed out that failure to retrieve a prohibition did not prove permission. The product began distinguishing 'I found evidence that this is allowed' from 'I found no evidence that this is prohibited.'",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a22",
+    "question": "When Northstar renewed in December, what plan and monthly price did it move to, and why?",
+    "reference_answer": "Northstar renewed for another six months on a negotiated workspace plan of Rs 58,000 per month, because its indexed corpus had grown beyond the standard allowance.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a23",
+    "question": "What recruiting confusion led the people directory to store stable person IDs?",
+    "reference_answer": "Two candidates shared the first name Sana (Sana Iqbal, who was hired, and Sana Kapoor, who withdrew before the final round), which produced confusing references in recruiting notes, so the people directory began storing stable person IDs.",
+    "source_doc": "aster_loop.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "a24",
+    "question": "According to Arjun, what was the company's central insight?",
+    "reference_answer": "That the central insight was not that language models could remember more, but that organizations continuously manufacture conflicting versions of reality; a useful memory system therefore needed provenance, time, authority and the courage to say it did not know. Retrieval was the mechanism; trust was the product.",
+    "source_doc": "aster_loop.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "a25",
+    "question": "What target precision on supported answers did the November evaluation set for high-impact questions?",
+    "reference_answer": "At least 92 percent precision on supported answers, even if that reduced overall answer coverage. The team tracked this as abstention quality rather than failure rate.",
+    "source_doc": "aster_loop.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "a26",
+    "question": "What is the boiling point of water at sea level?",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": "a27",
+    "question": "Who won the 2022 FIFA World Cup?",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  }
+]
