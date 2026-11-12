@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 # Force in-memory mode for testing
 with patch.dict("os.environ", {"CACHE_BACKEND": "memory"}):
+    import app.core.cache as cache_module
     from app.core.cache import (
         get_cache,
         set_cache,
@@ -14,6 +15,8 @@ with patch.dict("os.environ", {"CACHE_BACKEND": "memory"}):
         get_metric,
         bump_cache_generation,
         get_cache_generation,
+        init_cache,
+        close_cache,
         _local_cache,
     )
 
@@ -127,4 +130,126 @@ class TestCacheGeneration:
 
         # user_1 is still 2
         assert await get_cache_generation("user_1") == 2
+
+
+class FakeRedis:
+    """In-memory stub implementing the redis.asyncio client interface."""
+    def __init__(self):
+        self.store = {}
+        self.closed = False
+
+    async def get(self, key: str):
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str):
+        self.store[key] = value
+
+    async def setex(self, key: str, ttl: int, value: str):
+        self.store[key] = value
+
+    async def delete(self, key: str):
+        self.store.pop(key, None)
+
+    async def incrby(self, key: str, amount: int):
+        val = int(self.store.get(key, 0)) + amount
+        self.store[key] = str(val)
+        return val
+
+    async def incrbyfloat(self, key: str, amount: float):
+        val = float(self.store.get(key, 0.0)) + amount
+        self.store[key] = str(val)
+        return val
+
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        self.closed = True
+
+    async def close(self):
+        self.closed = True
+
+
+class TestRedisCache:
+    @pytest.fixture(autouse=True)
+    def setup_fake_redis(self):
+        fake = FakeRedis()
+        cache_module._redis_client = fake
+        yield fake
+        cache_module._redis_client = None
+
+    @pytest.mark.asyncio
+    async def test_redis_set_and_get(self, setup_fake_redis):
+        await set_cache("key1", {"message": "hello"})
+        val = await get_cache("key1")
+        assert val == {"message": "hello"}
+
+    @pytest.mark.asyncio
+    async def test_redis_get_nonexistent(self, setup_fake_redis):
+        assert await get_cache("nonexistent") is None
+
+    @pytest.mark.asyncio
+    async def test_redis_delete(self, setup_fake_redis):
+        await set_cache("to_del", "val")
+        assert await get_cache("to_del") == "val"
+        await delete_cache("to_del")
+        assert await get_cache("to_del") is None
+
+    @pytest.mark.asyncio
+    async def test_redis_metrics(self, setup_fake_redis):
+        await increment_metric("counter", 1)
+        await increment_metric("counter", 2)
+        assert await get_metric("counter") == 3.0
+
+    @pytest.mark.asyncio
+    async def test_redis_float_metric(self, setup_fake_redis):
+        await increment_metric("float_counter", 1.5)
+        await increment_metric("float_counter", 2.25)
+        assert abs(await get_metric("float_counter") - 3.75) < 0.001
+
+    @pytest.mark.asyncio
+    async def test_redis_cache_generation(self, setup_fake_redis):
+        assert await get_cache_generation("u1") == 0
+        gen = await bump_cache_generation("u1")
+        assert gen == 1
+        assert await get_cache_generation("u1") == 1
+
+
+class TestCacheStartup:
+    @pytest.mark.asyncio
+    async def test_init_cache_memory_mode(self):
+        with patch.dict("os.environ", {"CACHE_BACKEND": "memory"}):
+            await init_cache()
+            assert cache_module._redis_client is None
+
+    @pytest.mark.asyncio
+    async def test_init_cache_redis_unreachable_raises(self):
+        with patch.dict("os.environ", {
+            "CACHE_BACKEND": "redis",
+            "REDIS_URL": "redis://127.0.0.1:1/0"
+        }):
+            with pytest.raises(RuntimeError) as exc_info:
+                await init_cache()
+            assert "Could not connect to Redis" in str(exc_info.value)
+            assert cache_module._redis_client is None
+
+    @pytest.mark.asyncio
+    async def test_init_cache_redis_import_error_raises(self):
+        with patch.dict("os.environ", {"CACHE_BACKEND": "redis"}):
+            with patch.dict("sys.modules", {"redis.asyncio": None}):
+                with pytest.raises(RuntimeError) as exc_info:
+                    await init_cache()
+                assert "Failed to import redis.asyncio" in str(exc_info.value)
+                assert cache_module._redis_client is None
+
+    @pytest.mark.asyncio
+    async def test_init_cache_redis_success(self):
+        fake = FakeRedis()
+        with patch.dict("os.environ", {"CACHE_BACKEND": "redis"}), \
+             patch("redis.asyncio.from_url", return_value=fake):
+            await init_cache()
+            assert cache_module._redis_client is fake
+            await close_cache()
+            assert cache_module._redis_client is None
+            assert fake.closed is True
 
