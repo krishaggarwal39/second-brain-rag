@@ -1,11 +1,14 @@
 import re
 import asyncio
-from typing import List, Set
+from typing import List, Optional, Set
 
 from app.rag.graph.neo4j_manager import get_neo4j_manager
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Minimum candidate entity name length to consider during question matching (R-48)
+MIN_ENTITY_NAME_LENGTH: int = 4
 
 
 def _normalize_for_matching(text: str) -> str:
@@ -24,13 +27,13 @@ def find_matching_entities(
     question: str,
     entity_names: List[str],
     max_entities: int = 3,
-    min_length: int = 4,
+    min_length: int = MIN_ENTITY_NAME_LENGTH,
 ) -> List[str]:
     """
     Match candidate entity names against the question locally and deterministically.
     - Case-insensitive
     - Whole-word boundary substring matching (with optional plural suffix)
-    - Ignores candidate names shorter than min_length (default 4)
+    - Ignores candidate names shorter than min_length (default MIN_ENTITY_NAME_LENGTH = 4)
     - Prefers longer (more specific) names, returning up to max_entities (default 3)
     """
     q_norm = _normalize_for_matching(question)
@@ -56,21 +59,21 @@ def find_matching_entities(
     return matched[:max_entities]
 
 
-async def retrieve_graph_context(question: str) -> str:
+async def retrieve_graph_context(question: str, owner_id: Optional[str] = None) -> str:
     """
     Fast and robust deterministic GraphRAG retriever:
-    1. Loads cached entity names from Neo4j (no per-query LLM call).
+    1. Loads cached entity names for owner_id from Neo4j (no per-query LLM call).
     2. Deterministically matches question against node names locally.
-    3. Fetches 1-hop relationship context from Neo4j for top matched entities.
+    3. Fetches 1-hop relationship context from Neo4j for top matched entities of owner_id.
     4. Formats and deduplicates context blocks; returns empty string if no match.
     Fully non-fatal: any exception logs and safely returns "".
     """
-    if not question:
+    if not question or not owner_id:
         return ""
 
     try:
         manager = get_neo4j_manager()
-        entity_names = await asyncio.to_thread(manager.get_all_entity_names)
+        entity_names = await asyncio.to_thread(manager.get_all_entity_names, owner_id=str(owner_id))
         if not entity_names:
             return ""
 
@@ -78,14 +81,14 @@ async def retrieve_graph_context(question: str) -> str:
         if not matched_entities:
             return ""
 
-        logger.info(f"Graph Search matched entities: {matched_entities}")
+        logger.info(f"Graph Search matched entities for owner {owner_id}: {matched_entities}")
 
         blocks: List[str] = []
         seen_rel_lines: Set[str] = set()
 
         for entity_name in matched_entities:
             relationships = await asyncio.to_thread(
-                manager.get_related_context, entity_name
+                manager.get_related_context, entity_name, str(owner_id)
             )
             if not relationships:
                 continue
