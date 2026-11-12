@@ -11,7 +11,7 @@ RUN echo "VITE_API_URL=/api" > .env.production
 RUN npm run build
 
 # Stage 2: Serve with an unprivileged nginx (runs as uid 101, listens on 8080)
-FROM nginxinc/nginx-unprivileged:1.27.3-alpine
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
