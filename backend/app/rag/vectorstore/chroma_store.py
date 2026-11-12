@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 from typing import List, Dict, Any, Optional
@@ -27,23 +28,37 @@ def get_client() -> chromadb.ClientAPI:
         return _client
 
     chroma_host = os.getenv("CHROMA_HOST", "chroma")
-    chroma_port = int(os.getenv("CHROMA_PORT", "8001"))
+    chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
     chroma_token = os.getenv("CHROMA_AUTH_TOKEN")
 
     try:
         if chroma_token:
             settings = Settings(
                 anonymized_telemetry=False,
-                chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
+                # chromadb 0.5.x path. The old `chromadb.auth.token` module no longer
+                # exists; importing it failed and silently triggered the local fallback.
+                chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider",
                 chroma_client_auth_credentials=chroma_token,
             )
         else:
             settings = Settings(anonymized_telemetry=False)
 
         _client = chromadb.HttpClient(host=chroma_host, port=chroma_port, settings=settings)
-    except Exception:
-        # Fallback to local persistent client (useful when running outside Docker)
+    except Exception as e:
+        # The runtime audit found this fallback silently writing to a private
+        # SQLite store inside the container. It is now opt-in (local dev/tests).
+        if os.getenv("CHROMA_ALLOW_LOCAL_FALLBACK", "false").lower() not in ("1", "true", "yes"):
+            logger.error("ChromaDB server unreachable", host=chroma_host, port=chroma_port,
+                         error_type=type(e).__name__)
+            raise
         persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
+        logger.error("ChromaDB server unreachable; using LOCAL PersistentClient fallback",
+                     host=chroma_host, port=chroma_port, persist_dir=persist_dir)
+        if not hasattr(chromadb, "PersistentClient"):
+            raise RuntimeError(
+                "CHROMA_ALLOW_LOCAL_FALLBACK needs the full `chromadb` package; "
+                "production installs the HTTP-only `chromadb-client`."
+            ) from e
         _client = chromadb.PersistentClient(
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False),
@@ -63,11 +78,11 @@ async def add_documents(
     embeddings: List[List[float]],
     metadatas: List[Dict[str, Any]],
 ):
-    collection = get_collection()
+    collection = await asyncio.to_thread(get_collection)
 
     ids = [meta.get("hash", str(uuid.uuid4())) for meta in metadatas]
 
-    existing_set = set(collection.get(ids=ids)["ids"])
+    existing_set = set((await asyncio.to_thread(collection.get, ids=ids))["ids"])
 
     new_docs, new_embs, new_metas, new_ids = [], [], [], []
     for i, doc_id in enumerate(ids):
@@ -89,7 +104,8 @@ async def add_documents(
         clean.setdefault("doc_id", clean.get("filename", clean.get("url", "unknown")))
         clean_metas.append(clean)
 
-    collection.add(
+    await asyncio.to_thread(
+        collection.add,
         ids=new_ids,
         embeddings=new_embs,
         documents=new_docs,
@@ -104,9 +120,10 @@ async def query(
     score_threshold: float = 0.0,
     filters: Optional[Dict] = None,
 ) -> List[Dict]:
-    collection = get_collection()
+    collection = await asyncio.to_thread(get_collection)
 
-    results = collection.query(
+    results = await asyncio.to_thread(
+        collection.query,
         query_embeddings=[embedding],
         n_results=n_results,
         where=filters,
@@ -122,7 +139,8 @@ async def query(
         results["metadatas"][0],
         results["distances"][0],
     ):
-        # ChromaDB returns L2 distances; convert to a 0-1 similarity score.
+        # Default collection space is L2; 1/(1+d) is a monotonic 0-1 score. Switching
+        # existing collections to cosine is not done automatically (needs re-index).
         score = 1.0 / (1.0 + dist)
         if score >= score_threshold:
             output.append({"text": doc, "metadata": meta, "score": score})
@@ -136,17 +154,18 @@ async def delete_document(doc_id: str, owner_id: Optional[str] = None):
         where_clause = {"$and": [{"doc_id": doc_id}, {"owner_id": str(owner_id)}]}
     else:
         where_clause = {"doc_id": doc_id}
-    get_collection().delete(where=where_clause)
+    collection = await asyncio.to_thread(get_collection)
+    await asyncio.to_thread(collection.delete, where=where_clause)
 
 
 @_chroma_retry
 async def get_document_parents(doc_id: str, owner_id: Optional[str] = None) -> set:
-    collection = get_collection()
+    collection = await asyncio.to_thread(get_collection)
     if owner_id:
         where_clause = {"$and": [{"doc_id": doc_id}, {"owner_id": str(owner_id)}]}
     else:
         where_clause = {"doc_id": doc_id}
-    results = collection.get(where=where_clause, include=["metadatas"])
+    results = await asyncio.to_thread(collection.get, where=where_clause, include=["metadatas"])
     parents = set()
     for m in results.get("metadatas", []):
         if m and "parent_id" in m:
@@ -160,8 +179,8 @@ async def get_chunk_metadatas(ids: List[str]) -> Dict[str, Dict]:
     if not ids:
         return {}
     try:
-        collection = get_collection()
-        results = collection.get(ids=ids, include=["metadatas"])
+        collection = await asyncio.to_thread(get_collection)
+        results = await asyncio.to_thread(collection.get, ids=ids, include=["metadatas"])
         res_ids = results.get("ids", [])
         res_metas = results.get("metadatas", [])
         return {cid: meta for cid, meta in zip(res_ids, res_metas) if meta}
@@ -172,8 +191,8 @@ async def get_chunk_metadatas(ids: List[str]) -> Dict[str, Dict]:
 
 @_chroma_retry
 async def list_documents() -> List[Dict]:
-    collection = get_collection()
-    results = collection.get(include=["metadatas"])
+    collection = await asyncio.to_thread(get_collection)
+    results = await asyncio.to_thread(collection.get, include=["metadatas"])
 
     docs_map: Dict[str, Dict] = {}
     for m in results["metadatas"]:

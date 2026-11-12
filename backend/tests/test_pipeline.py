@@ -121,7 +121,8 @@ async def test_ask_caching_with_success_flag(pipeline):
          patch("app.rag.pipeline.llm_manager.get_active_provider", return_value="groq"), \
          patch("app.rag.pipeline.llm_manager.get_api_key", return_value="fake-key"):
 
-        mock_retrieve.return_value = ([], "", 5.0)
+        # One retrieved chunk: with no context the pipeline refuses without an LLM call (R-26).
+        mock_retrieve.return_value = ([{"text": "ctx", "filename": "a.txt", "rerank_score": 1.0}], "", 5.0)
 
         # 1. Legit answer containing the word "Error" (previously false-positive: was blocked from cache)
         mock_response_ok = MagicMock()
@@ -179,7 +180,8 @@ async def test_ask_stream_caching_validation(pipeline):
          patch("app.rag.pipeline.llm_manager.get_active_provider", return_value="groq"), \
          patch("app.rag.pipeline.llm_manager.get_api_key", return_value="fake-key"):
 
-        mock_retrieve.return_value = ([], "", 5.0)
+        # One retrieved chunk: with no context the pipeline refuses without an LLM call (R-26).
+        mock_retrieve.return_value = ([{"text": "ctx", "filename": "a.txt", "rerank_score": 1.0}], "", 5.0)
 
         # 1. Successful stream with non-empty answer is cached
         class MockStreamSuccess:

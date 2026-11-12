@@ -35,6 +35,7 @@ class LLMManager:
         # to the Groq provider. Backward compatible with a single key.
         self.gemini_keys = [k.strip() for k in os.getenv("GOOGLE_API_KEY", "").split(",") if k.strip()]
         self._gemini_key_idx = 0
+        self._key_cooldown_until: Dict[str, float] = {}
         self.groq_key = os.getenv("GROQ_API_KEY", "")
 
         self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -49,22 +50,50 @@ class LLMManager:
 
     @property
     def gemini_key(self) -> str:
-        """Current active Gemini key (first of the rotation list)."""
+        """Currently active Gemini key."""
         return self.gemini_keys[self._gemini_key_idx] if self.gemini_keys else ""
 
-    def rotate_gemini_key(self) -> bool:
-        """Advance to the next Gemini key. Returns True if another key is available,
-        False if all keys have been exhausted (caller should then fail over to Groq."""
+    def rotate_gemini_key(self, failed_key: Optional[str] = None) -> bool:
+        """Handle a 429 for `failed_key` (default: the current key). R-28.
+
+        Returns True when the caller should retry with the (possibly new) current
+        key, False when every key is cooling down (caller fails over to Groq).
+
+        - Concurrent 429s for the same key rotate only once: if another request
+          already moved past `failed_key`, we just retry with the current key.
+        - A rate-limited key cools down for GEMINI_KEY_COOLDOWN_SECONDS and is
+          then eligible again, so rotation never gets stuck at the last key.
+        """
+        cooldown = float(os.getenv("GEMINI_KEY_COOLDOWN_SECONDS", "60"))
         with self._lock:
-            if self._gemini_key_idx < len(self.gemini_keys) - 1:
-                self._gemini_key_idx += 1
-                logger.warning(
-                    f"Gemini key rate-limited; rotating to key "
-                    f"{self._gemini_key_idx + 1}/{len(self.gemini_keys)}"
-                )
-                return True
-            logger.warning("All Gemini keys exhausted; no more keys to rotate to.")
+            if not self.gemini_keys:
+                return False
+            now = time.time()
+            if failed_key is None:
+                failed_key = self.gemini_keys[self._gemini_key_idx]
+            self._key_cooldown_until[failed_key] = now + cooldown
+            current = self.gemini_keys[self._gemini_key_idx]
+            if current != failed_key and self._key_cooldown_until.get(current, 0) <= now:
+                return True  # someone else already rotated to a healthy key
+            n = len(self.gemini_keys)
+            for step in range(1, n + 1):
+                idx = (self._gemini_key_idx + step) % n
+                key = self.gemini_keys[idx]
+                if self._key_cooldown_until.get(key, 0) <= now:
+                    if idx != self._gemini_key_idx:
+                        self._gemini_key_idx = idx
+                        logger.warning(f"Gemini key rate-limited; rotating to key {idx + 1}/{n}")
+                        return True
+            logger.warning("All Gemini keys are cooling down; no more keys to rotate to.")
             return False
+
+    @staticmethod
+    def generation_settings() -> Dict[str, Any]:
+        """Sampling settings shared by every answer call (R-26)."""
+        return {
+            "temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
+            "max_output_tokens": int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1024")),
+        }
 
     def get_active_provider(self) -> str:
         with self._lock:
@@ -209,7 +238,7 @@ class LLMManager:
                     if response.status_code == 429:
                         # On Gemini 429, first try the next Gemini key (rotation);
                         # only fail over to Groq once all Gemini keys are exhausted.
-                        if provider == "gemini" and self.rotate_gemini_key():
+                        if provider == "gemini" and self.rotate_gemini_key(api_key):
                             continue
                         self.switch_to_fallback(provider)
                         if attempt < max_retries - 1:

@@ -56,10 +56,10 @@ def real_stack(monkeypatch):
 
     # Real ephemeral Chroma, injected into the store module. Reset the module-level
     # _client singleton too so this ephemeral client never leaks into other tests.
-    import chromadb
+    from tests.conftest import make_test_chroma_client
     import app.rag.vectorstore.chroma_store as chroma_mod
     monkeypatch.setattr(chroma_mod, "_client", None, raising=False)
-    client = chromadb.EphemeralClient()
+    client = make_test_chroma_client()
     monkeypatch.setattr(chroma_mod, "get_client", lambda: client)
     monkeypatch.setattr(chroma_mod, "_client", client, raising=False)
     # get_collection uses get_client(); make sure a fresh collection is used

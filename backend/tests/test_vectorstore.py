@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import patch, MagicMock
-import chromadb
 
+from tests.conftest import make_test_chroma_client
 from app.rag.vectorstore.chroma_store import add_documents, query, delete_document, list_documents, get_stats
 
 @pytest.fixture
 def mock_chroma_client():
-    client = chromadb.EphemeralClient()
+    client = make_test_chroma_client()
     with patch("app.rag.vectorstore.chroma_store.get_client", return_value=client):
         yield client
         
