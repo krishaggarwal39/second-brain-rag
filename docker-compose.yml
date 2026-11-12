@@ -83,7 +83,7 @@ services:
       - backend
 
   neo4j:
-    image: neo4j:5.26.29
+    image: neo4j:5.26.32
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
