@@ -1,0 +1,12 @@
+# Optional HTTPS front door (compose profile "tls").
+# Caddy obtains a certificate for $DOMAIN automatically and redirects HTTP to HTTPS.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy frontend:8080 {
+		header_up X-Forwarded-Proto https
+	}
+}

@@ -1,31 +1,73 @@
-version: '3.8'
+# Development stack. Ports bind to 127.0.0.1 only.
+# The credential defaults below are the ones existing dev volumes were created with
+# (Postgres/Neo4j only apply credentials on first init), so they stay unchanged.
+# They are dev-only: docker-compose.prod.yml requires real secrets and has no defaults.
+
+x-dev-env: &dev-env
+  CACHE_BACKEND: redis
+  REDIS_URL: redis://redis:6379/0
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-strongpassword}
+  CHROMA_HOST: chroma
+  CHROMA_PORT: "8000"
+  CHROMA_AUTH_TOKEN: ${CHROMA_AUTH_TOKEN:-dev-only-chroma-token}
+  ANONYMIZED_TELEMETRY: "False"
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: ${NEO4J_USER:-neo4j}
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:-strongpassword}
+  SPARSE_BACKEND: postgres
+  DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword}@postgres:5432/${POSTGRES_DB:-second_brain}
+  UPLOAD_DIR: /data/uploads
+  # Startup refuses a missing/weak JWT secret; dev gets a fixed, clearly dev-only one.
+  JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-not-for-production}
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
 
 services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
+    environment: *dev-env
     depends_on:
-      - neo4j
-      - redis
-      - chroma
-      - postgres
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     volumes:
+      - uploads:/data/uploads
       - bm25_data:/app/bm25_data
 
   worker:
     build: ./backend
-    command: celery -A app.worker.celery_app worker --loglevel=info
+    command: >
+      celery -A app.worker.celery_app worker --loglevel=info
+      --concurrency=${CELERY_CONCURRENCY:-2}
     env_file:
       - .env
+    environment: *dev-env
+    # Override the image HEALTHCHECK (it curls the API port, which the worker does not serve).
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10 >/dev/null"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
     depends_on:
-      - redis
-      - neo4j
-      - chroma
-      - postgres
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     volumes:
+      - uploads:/data/uploads
       - bm25_data:/app/bm25_data
 
   frontend:
@@ -33,56 +75,82 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:8080"
     environment:
-      # API_KEY is injected at runtime by Nginx via envsubst — do NOT use VITE_ prefix here.
-      # The frontend itself never exposes the key; Nginx adds it server-side on every proxied request.
+      # nginx injects API_KEY server-side; do NOT use a VITE_ prefix here.
       - API_KEY=${API_KEY}
     depends_on:
       - backend
 
   neo4j:
-    image: neo4j:5
+    image: neo4j:5.26.29
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     environment:
-      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-strongpassword}
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-strongpassword}
+      HC_USER: ${NEO4J_USER:-neo4j}
+      HC_PASSWORD: ${NEO4J_PASSWORD:-strongpassword}
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u \"$$HC_USER\" -p \"$$HC_PASSWORD\" 'RETURN 1' >/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
   chroma:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:0.5.23
     ports:
       - "127.0.0.1:8001:8000"
     environment:
-      - IS_PERSISTENT=TRUE
-      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_AUTH_TOKEN:-default-strong-token}
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      CHROMA_SERVER_AUTHN_PROVIDER: chromadb.auth.token_authn.TokenAuthenticationServerProvider
+      CHROMA_SERVER_AUTHN_CREDENTIALS: ${CHROMA_AUTH_TOKEN:-dev-only-chroma-token}
+      CHROMA_AUTH_TOKEN_TRANSPORT_HEADER: Authorization
     volumes:
       - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   redis:
-    image: redis:alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-strongpassword}
+    image: redis:8.10.0-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-strongpassword}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-strongpassword}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   postgres:
-    image: postgres:15-alpine
+    # Kept on 15: existing dev volumes hold PG15 data (a major bump needs pg_upgrade).
+    image: postgres:15.10-alpine
     ports:
       - "127.0.0.1:5432:5432"
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgrespassword}
-      - POSTGRES_DB=${POSTGRES_DB:-second_brain}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${POSTGRES_DB:-second_brain}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-networks:
-  default:
-    driver: bridge
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   neo4j_data:
@@ -90,3 +158,4 @@ volumes:
   redis_data:
   bm25_data:
   postgres_data:
+  uploads:

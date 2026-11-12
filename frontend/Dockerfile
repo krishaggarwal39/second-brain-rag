@@ -1,29 +1,29 @@
 # Stage 1: Build the React application
-FROM node:20-alpine AS build
+FROM node:20.18.1-alpine AS build
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+# Reproducible install from the lockfile.
+RUN npm ci
 COPY . .
-# We must pass the API URL at build time so the Vite app can talk to the backend.
-# In a real setup, you might use relative paths if Nginx proxies /api to the backend.
-# Here we'll configure Vite to hit /api, and Nginx will reverse proxy it to the backend container.
+# The app talks to /api; nginx reverse-proxies it to the backend container.
 RUN echo "VITE_API_URL=/api" > .env.production
 RUN npm run build
 
-# Stage 2: Serve with Nginx
-FROM nginx:alpine
+# Stage 2: Serve with an unprivileged nginx (runs as uid 101, listens on 8080)
+FROM nginxinc/nginx-unprivileged:1.27.3-alpine
 
-# Remove default nginx static assets
-RUN rm -rf /usr/share/nginx/html/*
-
-# Copy static assets from builder stage
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Copy our custom nginx configuration as a template for envsubst
+# Template rendered by the stock entrypoint. Only the variables listed in
+# NGINX_ENVSUBST_FILTER are substituted, so nginx runtime variables ($host, ...)
+# are never touched.
 COPY nginx.conf /etc/nginx/templates/default.conf.template
+COPY --chmod=0755 docker/05-require-api-key.sh /docker-entrypoint.d/05-require-api-key.sh
 
-# Expose port 80
-EXPOSE 80
+ENV NGINX_ENVSUBST_FILTER="^(API_KEY|REAL_IP_FROM)$" \
+    REAL_IP_FROM=127.0.0.1/32
+
+EXPOSE 8080
 
 CMD ["nginx", "-g", "daemon off;"]
