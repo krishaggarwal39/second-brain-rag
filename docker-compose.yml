@@ -137,7 +137,7 @@ services:
 
   postgres:
     # Kept on 15: existing dev volumes hold PG15 data (a major bump needs pg_upgrade).
-    image: postgres:15.10-alpine
+    image: postgres:18.4-alpine
     ports:
       - "127.0.0.1:5432:5432"
     environment:
