@@ -1,5 +1,5 @@
 # Stage 1: Build the React application
-FROM node:20.18.1-alpine AS build
+FROM node:26.13.0-alpine AS build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
