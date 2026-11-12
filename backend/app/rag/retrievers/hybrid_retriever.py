@@ -12,7 +12,7 @@ from sentence_transformers import CrossEncoder
 from app.rag.vectorstore.chroma_store import query as chroma_query, get_chunk_metadatas
 from app.rag.embeddings.local_embedder import embed_documents
 from app.rag.vectorstore.bm25_store import get_bm25_store
-from app.core.cache import get_cache
+from app.core.cache import get_cache, set_cache, increment_metric
 from app.core.telemetry import get_tracer
 
 logger = structlog.get_logger(__name__)
@@ -35,8 +35,7 @@ def get_last_hybrid_timings() -> Optional[Dict[str, float]]:
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RRF_K = int(os.getenv("RRF_K", "60"))
 RETRIEVAL_MULTIPLIER = int(os.getenv("RETRIEVAL_MULTIPLIER", "3"))
-USE_MMR = os.getenv("USE_MMR", "1")
-MMR_LAMBDA = float(os.getenv("MMR_LAMBDA", "0.7"))
+# USE_MMR / MMR_LAMBDA are read per call in hybrid_search (no module-level copies).
 
 # Load local cross-encoder for reranking (lazy-safe: if model download fails, reranking is skipped).
 try:
@@ -86,6 +85,28 @@ def _copy_metadata_to_doc(doc: Dict) -> None:
         page_num = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
         if page_num is not None:
             doc["page_number"] = page_num
+
+
+async def _hydrate_parent_content(doc: Dict) -> None:
+    """Hydrate parent chunk content with read-through fallback to sparse store DB (R-12)."""
+    meta = doc.get("metadata", {})
+    parent_id = meta.get("parent_id")
+    if parent_id:
+        parent_text = await get_cache(f"parent:{parent_id}")
+        if not parent_text:
+            # R-12: Read-through fallback to durable sparse store
+            parent_text = await asyncio.to_thread(get_bm25_store().get_parent, parent_id)
+            if parent_text:
+                await set_cache(f"parent:{parent_id}", parent_text, ttl=None)
+        if parent_text:
+            doc["parent_content"] = parent_text
+        else:
+            logger.warning(
+                "parent_missing",
+                parent_id=parent_id,
+                doc_id=meta.get("doc_id") or doc.get("doc_id"),
+            )
+            await increment_metric("parent_missing", 1)
 
 
 def _token_jaccard_similarity(tokens_a: set, tokens_b: set) -> float:
@@ -240,10 +261,12 @@ async def hybrid_search(
 
         if not reranker or not fused_results:
             timings["rerank_ms"] = 0.0
-            timings["parent_hydration_ms"] = 0.0
-            timings["mmr_ms"] = 0.0
+            _t = time.perf_counter()
             for doc in fused_results:
+                await _hydrate_parent_content(doc)
                 _copy_metadata_to_doc(doc)
+            timings["parent_hydration_ms"] = (time.perf_counter() - _t) * 1000
+            timings["mmr_ms"] = 0.0
             return _finish(fused_results[:top_k])
 
         # 4. Reranking (Cross-Encoder) — CPU-bound, runs in thread pool
@@ -258,13 +281,7 @@ async def hybrid_search(
             _t = time.perf_counter()
             for doc, score in zip(fused_results, scores):
                 doc["rerank_score"] = float(score)
-
-                meta = doc.get("metadata", {})
-                parent_id = meta.get("parent_id")
-                if parent_id:
-                    parent_text = await get_cache(f"parent:{parent_id}")
-                    if parent_text:
-                        doc["parent_content"] = parent_text
+                await _hydrate_parent_content(doc)
                 _copy_metadata_to_doc(doc)
             timings["parent_hydration_ms"] = (time.perf_counter() - _t) * 1000
 

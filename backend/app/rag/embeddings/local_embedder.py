@@ -1,37 +1,54 @@
 import os
+import time
+import threading
 from typing import List
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 _model = None
-_model_load_attempted = False
+_model_lock = threading.Lock()
+_last_failed_time = 0.0
+COOLDOWN_SECONDS = 30.0
+
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 
 
 def _get_model():
-    """Lazy-load the SentenceTransformer model on first use.
+    """Lazy-load the SentenceTransformer model on first use (thread-safe with cooldown).
 
-    Loading at module import time blocks the event loop (and gunicorn startup)
-    while the ~90 MB model downloads from HuggingFace. By deferring the load
-    to the first embed call (which already runs in a thread via asyncio.to_thread)
-    we keep startup fast and surface download errors as proper HTTP 500s rather
-    than silent crashes.
+    R-28: Add lock around lazy model load and allow retry after a failed load
+    (cooldown 30s) instead of failing permanently.
     """
-    global _model, _model_load_attempted
-    if _model_load_attempted:
+    global _model, _last_failed_time
+    if _model is not None:
         return _model
-    _model_load_attempted = True
-    try:
-        from sentence_transformers import SentenceTransformer
-        logger.info(f"Loading local embedding model: {EMBEDDING_MODEL}")
-        _model = SentenceTransformer(EMBEDDING_MODEL)
-        logger.info("Embedding model loaded successfully.")
-    except Exception as e:
-        logger.error(f"Failed to load local embedding model: {e}")
-        _model = None
-    return _model
+
+    with _model_lock:
+        if _model is not None:
+            return _model
+
+        now = time.time()
+        if (now - _last_failed_time) < COOLDOWN_SECONDS:
+            logger.warning(
+                "Embedding model load failed recently; in cooldown period",
+                cooldown_remaining=round(COOLDOWN_SECONDS - (now - _last_failed_time), 1),
+            )
+            return None
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info(f"Loading local embedding model: {EMBEDDING_MODEL}")
+            _model = SentenceTransformer(EMBEDDING_MODEL)
+            logger.info("Embedding model loaded successfully.")
+            _last_failed_time = 0.0
+            return _model
+        except Exception as e:
+            logger.error(f"Failed to load local embedding model: {e}")
+            _model = None
+            _last_failed_time = time.time()
+            return None
 
 
 async def embed_documents(texts: List[str]) -> List[List[float]]:

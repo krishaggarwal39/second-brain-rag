@@ -1,6 +1,5 @@
 import os
 import uuid
-import tempfile
 from fastapi import APIRouter, UploadFile, File, Request, HTTPException, Depends, status, Form
 from pydantic import BaseModel, HttpUrl, Field
 from app.core.auth import get_current_user
@@ -9,6 +8,7 @@ from app.rag.vectorstore.chroma_store import delete_document, get_document_paren
 from app.rag.vectorstore.bm25_store import get_bm25_store
 from app.core.exceptions import DocumentTooLargeError
 from app.core.cache import get_cache, delete_cache, bump_cache_generation
+from app.core.upload import get_upload_dir
 from app.core.rate_limit import limiter, UPLOAD_RATE_LIMIT, URL_RATE_LIMIT
 import structlog
 import asyncio
@@ -43,10 +43,13 @@ async def upload_document(
     owner_id = str(user_id)
     doc_id = f"{owner_id}:{uuid.uuid4()}"
 
-    fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(safe_filename)[1])
+    ext = os.path.splitext(safe_filename)[1].lower()
+    upload_dir = get_upload_dir()
+    target_path = os.path.join(upload_dir, f"{uuid.uuid4()}{ext}")
+
     try:
         total_size = 0
-        with os.fdopen(fd, "wb") as f:
+        with open(target_path, "wb") as f:
             while chunk := await file.read(8192):
                 total_size += len(chunk)
                 if total_size > max_size:
@@ -55,29 +58,43 @@ async def upload_document(
                     )
                 f.write(chunk)
 
-        mime = magic.from_file(temp_path, mime=True)
+        mime = magic.from_file(target_path, mime=True)
         allowed_mimes = {
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
         if mime not in allowed_mimes:
-            os.remove(temp_path)
+            if os.path.exists(target_path):
+                os.remove(target_path)
             raise HTTPException(status_code=400, detail=f"Invalid file type detected: {mime}")
 
     except DocumentTooLargeError:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(target_path):
+            os.remove(target_path)
         raise
     except HTTPException:
         raise
     except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(target_path):
+            os.remove(target_path)
         raise e
 
-    from app.worker import process_file_task
-    process_file_task.delay(temp_path, safe_filename, file.content_type or "", job_id, owner_id, doc_id, replace)
-    await bump_cache_generation(owner_id)
+    try:
+        from app.worker import process_file_task
+        process_file_task.delay(target_path, safe_filename, file.content_type or "", job_id, owner_id, doc_id, replace)
+    except Exception as e:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+        logger.error("Failed to enqueue file processing task", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue unavailable. Please try again later.",
+        )
+
+    # R-12: Do NOT bump cache generation on enqueue; worker bumps only on successful ingestion.
     return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 
 
@@ -91,9 +108,16 @@ async def upload_url(
     job_id = str(uuid.uuid4())
     owner_id = str(user_id)
     doc_id = f"{owner_id}:{uuid.uuid4()}"
-    from app.worker import process_url_task
-    process_url_task.delay(str(body.url), job_id, owner_id, doc_id, body.replace)
-    await bump_cache_generation(owner_id)
+    try:
+        from app.worker import process_url_task
+        process_url_task.delay(str(body.url), job_id, owner_id, doc_id, body.replace)
+    except Exception as e:
+        logger.error("Failed to enqueue URL processing task", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Task queue unavailable. Please try again later.",
+        )
+    # R-12: Do NOT bump cache generation on enqueue; worker bumps only on successful ingestion.
     return {"job_id": job_id, "doc_id": doc_id, "status": "processing"}
 
 
@@ -133,14 +157,28 @@ async def delete_doc(
             detail="Forbidden: Document does not belong to the current user",
         )
 
-    # Clean up parent chunks from Redis
+    # Clean up parent chunks from Redis and durable sparse store (R-12)
     parents = await get_document_parents(doc_id, owner_id=owner_id)
-    for p_id in parents:
+    store_parents = await asyncio.to_thread(get_bm25_store().get_parents_by_doc_id, doc_id, owner_id)
+    for p_id in set(parents).union(store_parents):
         await delete_cache(f"parent:{p_id}")
+    await asyncio.to_thread(get_bm25_store().delete_parents_by_doc_id, doc_id, owner_id)
         
     # Transactional safety is handled best-effort via execution ordering
     await delete_document(doc_id, owner_id=owner_id)
     await asyncio.to_thread(get_bm25_store().delete_documents_by_doc_id, doc_id, owner_id=owner_id)
+    
+    # Clean up knowledge graph
+    try:
+        if os.getenv("DISABLE_GRAPH", "0") != "1":
+            from app.rag.graph.neo4j_manager import get_neo4j_manager
+            await asyncio.to_thread(
+                get_neo4j_manager().delete_document_graph,
+                doc_id,
+                owner_id,
+            )
+    except Exception as e:
+        logger.warning(f"Graph deletion failed for doc {doc_id} (non-fatal): {e}")
     
     logger.info("Document deleted", doc_id=doc_id)
     await bump_cache_generation(owner_id)

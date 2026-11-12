@@ -481,11 +481,11 @@ class TestIngestionPipeline:
             mock_chroma_del.assert_called_once_with(old_doc_id, owner_id="user-1")
             mock_store.delete_documents_by_doc_id.assert_called_once_with(old_doc_id, owner_id="user-1")
 
-            # Assert deletion happened BEFORE chroma_add
+            # Assert new document indexed BEFORE old version deleted (R-19: replace-on-upload ordering)
             assert deletion_order == [
+                ("chroma_add",),
                 ("chroma_delete", old_doc_id, "user-1"),
                 ("bm25_delete", old_doc_id, "user-1"),
-                ("chroma_add",),
             ]
 
             # Assert new document indexed
@@ -643,8 +643,10 @@ class TestIngestionPipeline:
         """Celery tasks process_file_task and process_url_task pass replace flag to ingestion_pipeline."""
         from app.worker import process_file_task, process_url_task
 
-        with patch("app.worker.asyncio.run") as mock_run, \
-             patch("app.rag.ingestion.ingestion_pipeline.process_file") as mock_pf:
+        with patch("app.core.cache.init_cache", new_callable=AsyncMock), \
+             patch("app.core.cache.close_cache", new_callable=AsyncMock), \
+             patch("app.rag.ingestion.ingestion_pipeline.process_file", new_callable=AsyncMock) as mock_pf, \
+             patch("app.rag.ingestion.ingestion_pipeline.process_url", new_callable=AsyncMock) as mock_pu:
             process_file_task(
                 file_path="/tmp/test.pdf",
                 filename="test.pdf",
@@ -654,7 +656,6 @@ class TestIngestionPipeline:
                 doc_id="1:uuid",
                 replace=False,
             )
-            mock_run.assert_called_once()
             mock_pf.assert_called_once_with(
                 file_path="/tmp/test.pdf",
                 filename="test.pdf",
@@ -665,8 +666,6 @@ class TestIngestionPipeline:
                 replace=False,
             )
 
-        with patch("app.worker.asyncio.run") as mock_run, \
-             patch("app.rag.ingestion.ingestion_pipeline.process_url") as mock_pu:
             process_url_task(
                 url="https://example.com",
                 job_id="job-2",
@@ -674,7 +673,6 @@ class TestIngestionPipeline:
                 doc_id="1:uuid2",
                 replace=False,
             )
-            mock_run.assert_called_once()
             mock_pu.assert_called_once_with(
                 url="https://example.com",
                 job_id="job-2",
