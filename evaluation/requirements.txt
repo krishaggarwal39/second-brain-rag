@@ -1,3 +1,6 @@
-# Evaluation pipeline dependencies
+# Evaluation pipeline dependencies (install AFTER backend/requirements.txt)
 fpdf==1.7.2
-python-docx==1.1.2
+python-docx==1.2.0
+rich==15.0.0
+# Same version the backend resolves (chromadb-client pins numpy < 2).
+numpy==1.26.4

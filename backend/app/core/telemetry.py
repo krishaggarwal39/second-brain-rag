@@ -7,7 +7,7 @@ Provides distributed tracing across:
 - Database operations (Neo4j, ChromaDB)
 - LLM API calls
 
-Exports traces to console/file by default (zero cost). Can be configured
+Spans are not exported by default (OTEL_EXPORTER=none). Can be configured
 to export to Jaeger, Zipkin, or any OTLP-compatible backend via env vars.
 """
 
@@ -17,7 +17,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
-    SimpleSpanProcessor,
 )
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -36,7 +35,7 @@ def init_telemetry(app=None):
     Configuration via environment variables:
     - OTEL_ENABLED: "true" to enable (default: "true")
     - OTEL_SERVICE_NAME: service name (default: "second-brain-rag")
-    - OTEL_EXPORTER: "console", "otlp", or "none" (default: "console")
+    - OTEL_EXPORTER: "none", "console" or "otlp" (default: "none")
     - OTEL_OTLP_ENDPOINT: OTLP collector endpoint (if exporter=otlp)
     """
     global _initialized
@@ -50,13 +49,14 @@ def init_telemetry(app=None):
         return
 
     service_name = os.getenv("OTEL_SERVICE_NAME", "second-brain-rag")
-    exporter_type = os.getenv("OTEL_EXPORTER", "console").lower()
+    exporter_type = os.getenv("OTEL_EXPORTER", "none").lower()
 
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
 
+    # R-39: never export synchronously on the request path (SimpleSpanProcessor).
     if exporter_type == "console":
-        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+        provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
     elif exporter_type == "otlp":
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -68,15 +68,11 @@ def init_telemetry(app=None):
             provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
             logger.info(f"OTLP exporter configured: {endpoint}")
         except ImportError:
-            logger.warning(
-                "opentelemetry-exporter-otlp not installed. Falling back to console."
-            )
-            provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+            logger.warning("OTLP exporter not installed; spans are not exported.")
     elif exporter_type == "none":
         pass  # No exporter — traces are discarded (useful for tests)
     else:
-        logger.warning(f"Unknown OTEL_EXPORTER={exporter_type}, using console")
-        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+        logger.warning(f"Unknown OTEL_EXPORTER={exporter_type}; spans are not exported")
 
     trace.set_tracer_provider(provider)
 

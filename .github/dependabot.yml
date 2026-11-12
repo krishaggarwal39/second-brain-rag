@@ -1,0 +1,52 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # Must move together (kombu 5.7 requires redis >= 6.1).
+      celery-stack:
+        patterns: ["celery", "kombu", "redis"]
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
+    ignore:
+      # chromadb-client must match the chromadb/chroma server image (kept on 0.5.x
+      # for native token auth). Bump both together by hand.
+      - dependency-name: chromadb-client
+      # passlib 1.7.4 breaks with bcrypt >= 4.1.
+      - dependency-name: bcrypt
+
+  - package-ecosystem: pip
+    directory: /evaluation
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /backend
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: chromadb/chroma

@@ -1,0 +1,177 @@
+[
+  {
+    "id": "g01",
+    "question": "What is machine learning?",
+    "reference_answer": "Machine learning is a subset of artificial intelligence that enables systems to learn from data and improve their performance without being explicitly programmed. It uses algorithms to identify patterns in data and make decisions with minimal human intervention.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g02",
+    "question": "How does a neural network work?",
+    "reference_answer": "A neural network consists of layers of interconnected neurons. Each neuron applies weights to its inputs, sums them, and passes the result through an activation function. Networks with multiple hidden layers are called deep neural networks.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g03",
+    "question": "What is the difference between supervised and unsupervised learning?",
+    "reference_answer": "Supervised learning uses labeled data, learning to map inputs to known outputs, with tasks like classification and regression. Unsupervised learning works with unlabeled data and finds hidden patterns through techniques like clustering and dimensionality reduction.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "comparison"
+  },
+  {
+    "id": "g04",
+    "question": "What is transfer learning?",
+    "reference_answer": "Transfer learning reuses a pretrained model on a new, related task. Instead of training from scratch, you fine-tune the pretrained model on your specific dataset, which is especially useful when you have limited training data.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g05",
+    "question": "What is gradient descent?",
+    "reference_answer": "Gradient descent is an optimization algorithm used to minimize the loss function. It iteratively adjusts parameters in the direction of steepest descent, with the learning rate controlling the step size. Variants include SGD, Adam, and RMSprop.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g06",
+    "question": "What is overfitting and how can it be prevented?",
+    "reference_answer": "Overfitting occurs when a model learns the training data too well, including noise, and fails to generalize to unseen data. It shows as high training accuracy but low validation accuracy. Regularization, dropout, and cross-validation help prevent it.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g07",
+    "question": "Explain backpropagation.",
+    "reference_answer": "Backpropagation computes gradients of the loss function with respect to each weight using the chain rule. It propagates the error backward through the network layers, allowing efficient gradient computation for training deep networks.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g08",
+    "question": "What are Python's main data structures?",
+    "reference_answer": "Python's core data structures are the list (ordered, mutable sequences), the dictionary (key-value pairs with O(1) lookup), the tuple (immutable sequences), and the set (unordered collections of unique elements).",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g09",
+    "question": "How do decorators work in Python?",
+    "reference_answer": "Decorators modify or extend a function's behavior without changing the function itself. They use the @ syntax and are higher-order functions that take a function as input and return a wrapper function with added behavior.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g10",
+    "question": "What is the Global Interpreter Lock (GIL)?",
+    "reference_answer": "The GIL is a mutex in CPython that allows only one thread to execute Python bytecode at a time. It simplifies memory management but limits true parallel execution of threads, so multiprocessing is preferred over threading for CPU-bound work.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g11",
+    "question": "How does async/await and asyncio work in Python?",
+    "reference_answer": "Python's asyncio provides a single-threaded event loop for concurrent I/O. Coroutines defined with async def are scheduled as tasks on the event loop, and the await keyword suspends execution until the awaited coroutine completes, allowing other tasks to run in a non-blocking manner.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g12",
+    "question": "How does garbage collection work in Python?",
+    "reference_answer": "Python uses reference counting as its primary memory management strategy; when an object's reference count drops to zero it is immediately deallocated. A cycle detector handles circular references that reference counting alone cannot resolve.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g13",
+    "question": "What is the difference between REST and GraphQL?",
+    "reference_answer": "REST APIs expose multiple endpoints, one per resource. GraphQL provides a single endpoint with a typed schema where clients specify exactly what data they need in a query, eliminating the over-fetching and under-fetching problems common in REST.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "comparison"
+  },
+  {
+    "id": "g14",
+    "question": "Explain the CAP theorem.",
+    "reference_answer": "The CAP theorem states that a distributed system can provide at most two of three guarantees simultaneously: Consistency (all nodes see the same data), Availability (every request receives a response), and Partition Tolerance (the system operates despite network partitions).",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g15",
+    "question": "What is eventual consistency?",
+    "reference_answer": "Eventual consistency is a model where replicas may temporarily diverge but will converge to the same state given enough time without new updates. This trade-off enables higher availability in distributed databases.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g16",
+    "question": "How does the Raft consensus algorithm work?",
+    "reference_answer": "In Raft, nodes elect a leader that manages log replication, and followers replicate the leader's log entries. If the leader fails, a new election occurs among the followers with the most up-to-date logs.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "explanation"
+  },
+  {
+    "id": "g17",
+    "question": "What are microservices?",
+    "reference_answer": "Microservices decompose an application into small, independent services that can be developed, deployed, and scaled independently. The services communicate via APIs, message queues, or event streams.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g18",
+    "question": "What is a knowledge graph?",
+    "reference_answer": "A knowledge graph represents information as entities (nodes) connected by relationships (edges). This structure enables traversal queries that discover multi-hop connections between concepts.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g19",
+    "question": "What is Docker and containerization?",
+    "reference_answer": "Docker packages applications into lightweight, isolated containers that include all their dependencies. Containers share the host OS kernel, making them more efficient than virtual machines, and images are built from Dockerfiles.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "g20",
+    "question": "Why is multiprocessing preferred over threading for CPU-bound work in Python?",
+    "reference_answer": "Because the GIL allows only one thread to execute Python bytecode at a time, threads cannot run CPU-bound Python code truly in parallel. Multiprocessing sidesteps the GIL by using separate processes, so it is preferred for CPU-bound work.",
+    "source_doc": "python_programming_guide.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "g21",
+    "question": "What activation-related component lets a neural network layer transform its summed inputs?",
+    "reference_answer": "Each neuron applies weights to its inputs, sums them, and passes the result through an activation function, which is the component that transforms the summed inputs before passing them on.",
+    "source_doc": "machine_learning_fundamentals.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "g22",
+    "question": "Which three guarantees does the CAP theorem say you can only partially satisfy, and how many at once?",
+    "reference_answer": "The three guarantees are Consistency, Availability, and Partition Tolerance, and a distributed system can satisfy at most two of them at the same time.",
+    "source_doc": "distributed_systems_overview.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "g23",
+    "question": "What should I cook for dinner tonight?",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": "g24",
+    "question": "Tell me a joke about cats.",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": "g25",
+    "question": "What is the current stock price of Tesla?",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  }
+]

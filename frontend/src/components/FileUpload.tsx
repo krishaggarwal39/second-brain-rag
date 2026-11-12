@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { UploadCloud, AlertCircle, CheckCircle2, XCircle, Loader2, Link } from 'lucide-react';
 import api from '../services/api';
+import { apiErrorMessage, apiErrorStatus } from '../utils/errors';
 
 const MAX_SIZE_MB = 10;
 const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
@@ -20,17 +21,8 @@ export default function FileUpload() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
 
-  useEffect(() => {
-    const activeJobId = sessionStorage.getItem('activeJobId');
-    if (activeJobId) {
-      setIndexingState('indexing');
-      setProgress(100);
-      pollJobStatus(activeJobId);
-    }
-  }, []);
-
   // Polls /documents/jobs/:jobId until completion or timeout.
-  const pollJobStatus = async (jobId: string): Promise<void> => {
+  const pollJobStatus = useCallback(async (jobId: string): Promise<void> => {
     const deadline = Date.now() + JOB_POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, JOB_POLL_INTERVAL_MS));
@@ -51,8 +43,8 @@ export default function FileUpload() {
           return;
         }
         // still "processing" — keep polling
-      } catch (e: any) {
-        setError(e.response?.data?.detail || e.message || 'Failed to check job status');
+      } catch (e: unknown) {
+        setError(apiErrorMessage(e, 'Failed to check job status'));
         setIndexingState('failed');
         sessionStorage.removeItem('activeJobId');
         return;
@@ -62,7 +54,17 @@ export default function FileUpload() {
     setError('Indexing timed out. The file may be too large or the server is busy.');
     setIndexingState('failed');
     sessionStorage.removeItem('activeJobId');
-  };
+  }, [queryClient]);
+
+  // Resume polling a job that was still running when the page was reloaded.
+  useEffect(() => {
+    const activeJobId = sessionStorage.getItem('activeJobId');
+    if (activeJobId) {
+      setIndexingState('indexing');
+      setProgress(100);
+      pollJobStatus(activeJobId);
+    }
+  }, [pollJobStatus]);
 
   const uploadMutation = useMutation({
     mutationFn: async (file: globalThis.File) => {
@@ -86,8 +88,8 @@ export default function FileUpload() {
       sessionStorage.setItem('activeJobId', data.job_id);
       await pollJobStatus(data.job_id);
     },
-    onError: (err: any) => {
-      setError(err.response?.data?.detail || err.message || 'Upload failed');
+    onError: (err: unknown) => {
+      setError(apiErrorMessage(err, 'Upload failed'));
       setIndexingState('failed');
       setProgress(0);
     },
@@ -105,11 +107,11 @@ export default function FileUpload() {
       sessionStorage.setItem('activeJobId', data.job_id);
       await pollJobStatus(data.job_id);
     },
-    onError: (err: any) => {
-      if (err.response?.status === 429) {
+    onError: (err: unknown) => {
+      if (apiErrorStatus(err) === 429) {
         setError('Rate limit reached (2 requests per minute). Please wait.');
       } else {
-        setError(err.response?.data?.detail || err.message || 'URL ingestion failed');
+        setError(apiErrorMessage(err, 'URL ingestion failed'));
       }
       setIndexingState('failed');
       setProgress(0);

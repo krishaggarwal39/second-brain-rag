@@ -12,6 +12,8 @@ os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
 os.environ.setdefault("CACHE_BACKEND", "memory")
 os.environ.setdefault("CHROMA_HOST", "localhost")
 os.environ.setdefault("CHROMA_PORT", "8001")
+# Tests run without a Chroma server; allow the local fallback explicitly.
+os.environ.setdefault("CHROMA_ALLOW_LOCAL_FALLBACK", "true")
 os.environ.setdefault("JWT_SECRET", "test-jwt-secret-key-for-testing-only-12345")
 os.environ.setdefault("JWT_EXPIRY_MINUTES", "1440")
 
@@ -26,7 +28,7 @@ def auth_headers():
         with store._lock:
             cur = store.conn.execute("SELECT id FROM users WHERE id = 1")
             if not cur.fetchone():
-                hashed = pwd_context.hash("strongpassword123")
+                hashed = pwd_context.hash("Corr3ct-Horse-Battery")
                 store.conn.execute(
                     "INSERT OR IGNORE INTO users (id, email, hashed_password, created_at) VALUES (1, ?, ?, ?)",
                     ("testuser1@example.com", hashed, datetime.now(timezone.utc).isoformat())
@@ -101,3 +103,36 @@ def mock_bm25_results():
         {"id": "bm25-1", "text": "Neural networks are used in deep learning.", "score": 3.5},
         {"id": "bm25-2", "text": "Machine learning algorithms learn from data.", "score": 2.8},
     ]
+
+
+def make_test_chroma_client():
+    """A real Chroma client for tests.
+
+    Uses the embedded EphemeralClient when the full `chromadb` package is installed;
+    otherwise (production deps ship the HTTP-only `chromadb-client`) connects to a
+    Chroma server at CHROMA_TEST_HOST/CHROMA_TEST_PORT, or skips the test.
+    The shared "rag_collection" is dropped so every test starts clean.
+    """
+    import chromadb
+    from chromadb.config import Settings
+
+    client = None
+    try:
+        client = chromadb.EphemeralClient()
+    except Exception:
+        host = os.getenv("CHROMA_TEST_HOST")
+        if not host:
+            pytest.skip("embedded Chroma unavailable (thin client) and CHROMA_TEST_HOST not set")
+        token = os.getenv("CHROMA_TEST_TOKEN")
+        settings = Settings(
+            anonymized_telemetry=False,
+            chroma_client_auth_provider="chromadb.auth.token_authn.TokenAuthClientProvider" if token else None,
+            chroma_client_auth_credentials=token,
+        )
+        client = chromadb.HttpClient(host=host, port=int(os.getenv("CHROMA_TEST_PORT", "8000")), settings=settings)
+        client.heartbeat()
+    try:
+        client.delete_collection("rag_collection")
+    except Exception:
+        pass
+    return client

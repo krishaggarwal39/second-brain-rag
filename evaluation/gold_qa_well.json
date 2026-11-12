@@ -1,0 +1,191 @@
+[
+  {
+    "id": "w01",
+    "question": "What is well deliverability?",
+    "reference_answer": "Well deliverability is the oil or gas production rate achieved from a reservoir at a given bottomhole pressure. Deliverability tests (also called productivity tests) determine the flow capacity at specific reservoir and flowing pressure conditions, and wellbore deliverability is determined by the well inflow performance and the wellbore flow performance.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w02",
+    "question": "What is a deliverability test also called?",
+    "reference_answer": "A deliverability test is also called a productivity test.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w03",
+    "question": "What three aspects does analyzing production performance involve?",
+    "reference_answer": "It involves matching up three aspects: (1) inflow performance of formation fluid flowing from the formation to the wellbore, (2) vertical lift performance as the fluids flow up the tubing to surface, and (3) choke or bean performance as the fluids flow through the restriction at surface.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w04",
+    "question": "What factors does reservoir deliverability depend on?",
+    "reference_answer": "Reservoir deliverability depends on reservoir pressure, pay zone thickness and permeability, reservoir boundary type and distance, wellbore radius, reservoir fluid properties, near-wellbore condition, and reservoir relative permeabilities.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w05",
+    "question": "What is Darcy's law?",
+    "reference_answer": "Darcy's law is an equation that describes the flow of a fluid through a porous medium. It is one of the relations combined with conservation of mass and an equation of state to develop reservoir fluid flow equations.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w06",
+    "question": "Under what conditions does Darcy's law apply?",
+    "reference_answer": "Darcy's law applies only when the following conditions exist: laminar (viscous) flow, steady-state flow, incompressible fluids, and homogeneous formation.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w07",
+    "question": "What is steady-state flow in a reservoir?",
+    "reference_answer": "Steady-state flow is identified when the pressure at every location in the reservoir remains constant and does not change with time (the partial derivative of pressure with respect to time is zero). In reservoirs it can only occur when the reservoir is completely recharged and supported by a strong aquifer or pressure maintenance operations.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w08",
+    "question": "What is pseudo-steady state flow?",
+    "reference_answer": "Pseudo-steady state flow is the flowing condition when the pressure at different locations in the reservoir declines linearly as a function of time, i.e. at a constant declining rate (the partial derivative of pressure with respect to time is constant). It is also referred to as semisteady-state flow and quasisteady-state flow.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w09",
+    "question": "What is transient (unsteady-state) flow?",
+    "reference_answer": "Transient or unsteady-state flow is the fluid flowing condition at which the rate of change of pressure with respect to time at any position in the reservoir is not zero or constant. The pressure derivative with respect to time is a function of both position and time.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w10",
+    "question": "What is the Inflow Performance Relationship (IPR)?",
+    "reference_answer": "The Inflow Performance Relationship (IPR) is used for evaluating reservoir deliverability in production engineering. It is a graphical representation of the relation between the flowing bottom-hole pressure and the liquid production rate, plotting well production rate against flowing bottom-hole pressure to assess well performance.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "definition"
+  },
+  {
+    "id": "w11",
+    "question": "What is the productivity index and what are its units?",
+    "reference_answer": "The productivity index (PI or J) is the magnitude of the slope of the IPR curve and is a measure of the well's potential or ability to produce. Its unit is STB/D/psi.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w12",
+    "question": "When is the productivity index a valid measure of well productivity potential?",
+    "reference_answer": "The productivity index is a valid measure of the well productivity potential only if the well is flowing at pseudo steady state conditions. The well must be allowed to flow at a constant rate long enough to reach pseudo steady state.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w13",
+    "question": "Which empirical methods are used to predict the non-linear behavior of the IPR curve?",
+    "reference_answer": "Three empirical methods are used to predict the non-linear behavior of the IPR curve: Vogel's method, Standing's method, and Fetkovich's method.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w14",
+    "question": "Why does well productivity decrease as depletion proceeds in a solution-gas drive reservoir, according to Vogel?",
+    "reference_answer": "Vogel showed that productivity decreases primarily because the reservoir pressure is reduced and because the increasing gas saturation causes greater resistance to oil flow.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "w15",
+    "question": "What dimensionless parameters did Vogel use to plot the dimensionless IPR?",
+    "reference_answer": "Vogel used dimensionless pressure (Pwf divided by Pr) and dimensionless flow rate (Qo divided by Qo,max) to plot the dimensionless IPR.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w16",
+    "question": "What distinguishes a saturated oil reservoir from an undersaturated oil reservoir in terms of pressure?",
+    "reference_answer": "A saturated oil reservoir has reservoir pressure less than or equal to the bubble point pressure (Pr <= Pb), while an undersaturated oil reservoir has reservoir pressure greater than the bubble point pressure (Pr > Pb).",
+    "source_doc": "well_deliverability.pdf",
+    "category": "comparison"
+  },
+  {
+    "id": "w17",
+    "question": "What does Standing's method add compared to Vogel's method?",
+    "reference_answer": "Standing's method extends Vogel's work to account for wells that are damaged or improved. Vogel assumed a flow efficiency of 1 and did not account for damaged or improved wells, whereas Standing's method incorporates flow efficiency and the pressure drop due to skin.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "comparison"
+  },
+  {
+    "id": "w18",
+    "question": "In terms of flow efficiency, what do FE values less than 1, equal to 1, and greater than 1 indicate?",
+    "reference_answer": "FE less than 1 indicates a damaged well (skin is positive), FE equal to 1 indicates no change (skin is zero), and FE greater than 1 indicates a stimulated well (skin is negative).",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w19",
+    "question": "How was Fetkovich's non-linear IPR relationship developed and how many test points does it require?",
+    "reference_answer": "Fetkovich's non-linear IPR relationship was developed theoretically using the Darcy relation, expressed as qo = C(Pr^2 - Pwf^2)^n, where C is the flow coefficient and n depends on well characteristics. Two test points are required to determine the two model parameters.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w20",
+    "question": "In the Vogel saturated-reservoir example with average reservoir pressure 2500 psig and a stabilized rate of 350 STB/day at a flowing bottom-hole pressure of 2000 psig, what is the productivity index from the constant PI approach?",
+    "reference_answer": "The productivity index is J = qo / (Pr - Pwf) = 350 / (2500 - 2000) = 350/500 = 0.70 STB/day/psi.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "w21",
+    "question": "In that same Vogel example, what oil flow rate does the constant PI approach give at Pwf = 1850 psig?",
+    "reference_answer": "Using the constant PI approach, qo = J(Pr - Pwf) = 0.70 * (2500 - 1850) = 455 STB/day.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "w22",
+    "question": "In that same Vogel example, what is the maximum oil rate (qo,max) and the rate at Pwf = 1850 psig using Vogel's IPR method?",
+    "reference_answer": "Using Vogel's IPR method, qo,max is about 1067.1 STB/day (350/0.328), and the rate at Pwf = 1850 psig (Pwf/Pr = 0.74) is approximately 441.8 STB/day.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "numerical"
+  },
+  {
+    "id": "w23",
+    "question": "What can monitoring a well's productivity index reveal?",
+    "reference_answer": "By monitoring the PI of a well it is possible to determine problems associated with the well; an unexpected decline in PI warrants investigation. Because most of a well's life is spent at a flow regime that approximates pseudo steady state, PI is a valuable tool to predict future well performance.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "reasoning"
+  },
+  {
+    "id": "w24",
+    "question": "What is AOFP and how does it relate to these deliverability tests?",
+    "reference_answer": "AOFP (absolute open flow potential) can be obtained from deliverability tests, and the inflow performance relationship (IPR) can then be generated from it. It represents the flow potential and helps define the type of completion and artificial lift method to be used.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w25",
+    "question": "What primary reservoir characteristics determine the mathematical models that describe reservoir fluid flow behavior?",
+    "reference_answer": "The models vary with the types of fluid in the reservoir, the flow regimes, the reservoir geometry, and the number of flowing fluids in the reservoir.",
+    "source_doc": "well_deliverability.pdf",
+    "category": "factual"
+  },
+  {
+    "id": "w26",
+    "question": "What is the capital of France?",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  },
+  {
+    "id": "w27",
+    "question": "Give me a recipe for chocolate chip cookies.",
+    "reference_answer": "This question cannot be answered from the provided documents. The correct behavior is to refuse and state that the answer is not in the provided context.",
+    "source_doc": null,
+    "category": "out_of_scope"
+  }
+]

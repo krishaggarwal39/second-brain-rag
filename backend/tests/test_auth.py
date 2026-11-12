@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import patch
-from jose import jwt
+import jwt
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -220,9 +220,14 @@ class TestUserStoreBackendSelection:
             # Init
             pg_store = auth.PostgresUserStore(database_url=fake_url)
 
-            # create_user success
-            mock_cursor.fetchone.return_value = [42]
-            uid = pg_store.create_user("test@example.com", "pass123")
+            # create_user success: first fetchone is the case-insensitive
+            # duplicate check (no row), second is RETURNING id.
+            mock_cursor.fetchone.side_effect = [None, [42]]
+            uid = pg_store.create_user("Test@Example.com", "pass123")
+            mock_cursor.fetchone.side_effect = None
+            assert uid == 42
+            insert_args = mock_cursor.execute.call_args[0][1]
+            assert insert_args[0] == "test@example.com"  # stored normalised (R-04)
             assert uid == 42
             assert mock_conn.commit.called
 

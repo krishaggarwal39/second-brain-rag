@@ -80,7 +80,7 @@ class TestPDFLoader:
     async def test_rejects_encrypted_pdf(self, tmp_path):
         """Encrypted PDFs should raise ProcessingError."""
         # Create a mock encrypted PDF
-        with patch("PyPDF2.PdfReader") as mock_reader_cls:
+        with patch("pypdf.PdfReader") as mock_reader_cls:
             mock_reader = MagicMock()
             mock_reader.is_encrypted = True
             mock_reader_cls.return_value = mock_reader

@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import os
 import json
@@ -16,6 +17,27 @@ except ImportError:
     ThreadedConnectionPool = None
 
 logger = get_logger(__name__)
+
+
+# --- Query sanitisation shared by both sparse backends (R-22, R-24) ---------
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_MAX_QUERY_TOKENS = 64
+
+
+def query_tokens(query: str) -> List[str]:
+    """Alphanumeric tokens only. Operators (AND/OR/NOT/NEAR), quotes, '*', ':',
+    '-' and parentheses can never reach the query parser this way."""
+    return _TOKEN_RE.findall(query or "")[:_MAX_QUERY_TOKENS]
+
+
+def fts5_or_query(query: str) -> str:
+    """'"tok1" OR "tok2"': each token quoted so FTS5 treats it as a literal."""
+    return " OR ".join(f'"{t}"' for t in query_tokens(query))
+
+
+def tsquery_or_query(query: str) -> str:
+    """'tok1 | tok2' for to_tsquery; tokens are alphanumeric, so this is safe."""
+    return " | ".join(query_tokens(query))
 
 # Resolve to an absolute path so it works regardless of CWD.
 _data_dir = os.getenv("BM25_DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "..", "bm25_data"))
@@ -80,6 +102,18 @@ class BM25Store:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mapping_chunk_id ON corpus_mapping(chunk_id);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mapping_doc_id ON corpus_mapping(doc_id);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_doc_meta_owner_id ON document_metadata(owner_id);")
+
+        # R-12: Durable storage for parent chunks fallback
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                parent_id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                owner_id TEXT
+            );
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parents_doc_id ON parents(doc_id);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_parents_owner_id ON parents(owner_id);")
         self.conn.commit()
 
         self._lock = threading.Lock()
@@ -237,14 +271,13 @@ class BM25Store:
         return docs[0] if docs else None
 
     def search(self, query: str, top_k: int = 5, owner_id: Optional[str] = None) -> List[Dict]:
-        import re
         if not query.strip() or top_k <= 0:
             return []
 
-        words = [w for w in re.split(r'\W+', query) if w]
-        if not words:
+        safe_query = fts5_or_query(query)
+        if not safe_query:
+            logger.debug("Sparse query has no usable tokens", query_length=len(query))
             return []
-        safe_query = " OR ".join(words)
 
         # The single shared connection (check_same_thread=False) is NOT safe for
         # concurrent read+write across threads — SQLite raises InterfaceError. Serialize
@@ -288,6 +321,61 @@ class BM25Store:
             cursor = self.conn.execute("SELECT COUNT(*) FROM document_metadata")
             row = cursor.fetchone()
             return row[0] if row else 0
+
+    # --- Parent Chunks Durability (R-12) ---
+    # R-12: Storing parent chunks durably in the existing sparse store DB (parents table)
+    # provides a resilient fallback when Redis cache evicts or restarts. Storing parents
+    # in Chroma metadata is avoided because duplicating large parent chunks (2000 chars)
+    # across every child chunk metadata wastes vectorstore memory and storage.
+    def add_parents(self, parents: Dict[str, str], doc_id: str, owner_id: Optional[str] = None):
+        """Store parent chunks durably in SQLite."""
+        if not parents:
+            return
+        owner_str = str(owner_id) if owner_id else ""
+        data = [(pid, ptext, doc_id, owner_str) for pid, ptext in parents.items()]
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO parents (parent_id, text, doc_id, owner_id) VALUES (?, ?, ?, ?);",
+                data,
+            )
+            self.conn.commit()
+
+    def get_parent(self, parent_id: str) -> Optional[str]:
+        """Retrieve parent text by parent_id from SQLite."""
+        with self._lock:
+            cursor = self.conn.execute(
+                "SELECT text FROM parents WHERE parent_id = ?;", (parent_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def get_parents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None) -> List[str]:
+        """Retrieve all parent_ids for doc_id from SQLite."""
+        with self._lock:
+            if owner_id is not None:
+                cursor = self.conn.execute(
+                    "SELECT parent_id FROM parents WHERE doc_id = ? AND owner_id = ?;",
+                    (doc_id, str(owner_id)),
+                )
+            else:
+                cursor = self.conn.execute(
+                    "SELECT parent_id FROM parents WHERE doc_id = ?;", (doc_id,)
+                )
+            return [row[0] for row in cursor.fetchall()]
+
+    def delete_parents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None):
+        """Delete all parent chunks for doc_id from SQLite."""
+        with self._lock:
+            if owner_id is not None:
+                self.conn.execute(
+                    "DELETE FROM parents WHERE doc_id = ? AND owner_id = ?;",
+                    (doc_id, str(owner_id)),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM parents WHERE doc_id = ?;", (doc_id,)
+                )
+            self.conn.commit()
 
 SQLiteBM25Store = BM25Store
 
@@ -435,6 +523,22 @@ class PostgresBM25Store:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_corpus_owner_id ON corpus(owner_id);"
                 )
+
+                # 3. Parents table (R-12 durable parent storage)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS parents (
+                        parent_id TEXT PRIMARY KEY,
+                        text TEXT NOT NULL,
+                        doc_id TEXT NOT NULL,
+                        owner_id TEXT
+                    );
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_parents_doc_id ON parents(doc_id);"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_parents_owner_id ON parents(owner_id);"
+                )
             conn.commit()
 
     def add_documents(self, documents: List[Dict[str, str]]):
@@ -550,25 +654,30 @@ class PostgresBM25Store:
     def search(self, query: str, top_k: int = 5, owner_id: Optional[str] = None) -> List[Dict]:
         if not query or not query.strip() or top_k <= 0:
             return []
+        # R-24: same OR semantics as the SQLite store (websearch_to_tsquery ANDs
+        # every term, so long questions matched almost nothing).
+        ts_query = tsquery_or_query(query)
+        if not ts_query:
+            return []
 
         if owner_id is not None:
             sql = """
                 SELECT chunk_id, text, ts_rank_cd(ts, query) AS score
-                FROM corpus, websearch_to_tsquery('english', %s) query
+                FROM corpus, to_tsquery('english', %s) query
                 WHERE ts @@ query AND owner_id = %s
                 ORDER BY score DESC
                 LIMIT %s;
             """
-            params = (query.strip(), str(owner_id), top_k)
+            params = (ts_query, str(owner_id), top_k)
         else:
             sql = """
                 SELECT chunk_id, text, ts_rank_cd(ts, query) AS score
-                FROM corpus, websearch_to_tsquery('english', %s) query
+                FROM corpus, to_tsquery('english', %s) query
                 WHERE ts @@ query
                 ORDER BY score DESC
                 LIMIT %s;
             """
-            params = (query.strip(), top_k)
+            params = (ts_query, top_k)
 
         try:
             with self._get_connection() as conn:
@@ -595,6 +704,77 @@ class PostgresBM25Store:
                 cur.execute("SELECT COUNT(*) FROM document_metadata;")
                 row = cur.fetchone()
                 return int(row[0]) if row else 0
+
+    # --- Parent Chunks Durability (R-12) ---
+    def add_parents(self, parents: Dict[str, str], doc_id: str, owner_id: Optional[str] = None):
+        """Store parent chunks durably in PostgreSQL."""
+        if not parents:
+            return
+        owner_str = str(owner_id) if owner_id else ""
+        data = [(pid, ptext, doc_id, owner_str) for pid, ptext in parents.items()]
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if execute_batch:
+                    execute_batch(
+                        cur,
+                        """
+                        INSERT INTO parents (parent_id, text, doc_id, owner_id)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (parent_id) DO UPDATE SET
+                            text = EXCLUDED.text,
+                            doc_id = EXCLUDED.doc_id,
+                            owner_id = EXCLUDED.owner_id;
+                        """,
+                        data,
+                    )
+                else:
+                    for row in data:
+                        cur.execute(
+                            """
+                            INSERT INTO parents (parent_id, text, doc_id, owner_id)
+                            VALUES (%s, %s, %s, %s)
+                            ON CONFLICT (parent_id) DO UPDATE SET
+                                text = EXCLUDED.text,
+                                doc_id = EXCLUDED.doc_id,
+                                owner_id = EXCLUDED.owner_id;
+                            """,
+                            row,
+                        )
+            conn.commit()
+
+    def get_parent(self, parent_id: str) -> Optional[str]:
+        """Retrieve parent text by parent_id from PostgreSQL."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT text FROM parents WHERE parent_id = %s;", (parent_id,))
+                row = cur.fetchone()
+                return row[0] if row else None
+
+    def get_parents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None) -> List[str]:
+        """Retrieve all parent_ids for doc_id from PostgreSQL."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if owner_id is not None:
+                    cur.execute(
+                        "SELECT parent_id FROM parents WHERE doc_id = %s AND owner_id = %s;",
+                        (doc_id, str(owner_id)),
+                    )
+                else:
+                    cur.execute("SELECT parent_id FROM parents WHERE doc_id = %s;", (doc_id,))
+                return [row[0] for row in cur.fetchall()]
+
+    def delete_parents_by_doc_id(self, doc_id: str, owner_id: Optional[str] = None):
+        """Delete all parent chunks for doc_id from PostgreSQL."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if owner_id is not None:
+                    cur.execute(
+                        "DELETE FROM parents WHERE doc_id = %s AND owner_id = %s;",
+                        (doc_id, str(owner_id)),
+                    )
+                else:
+                    cur.execute("DELETE FROM parents WHERE doc_id = %s;", (doc_id,))
+            conn.commit()
 
     def close(self):
         """Close connection pool if enabled."""

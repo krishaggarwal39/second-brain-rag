@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import os
 import json
 import structlog
@@ -12,21 +13,40 @@ MAX_LOCAL_KEYS = 10000
 
 async def init_cache():
     global _redis_client
+    # R-03: Ensure init_cache is idempotent and does not leak clients if called twice.
+    if _redis_client is not None:
+        try:
+            await close_cache()
+        except Exception:
+            _redis_client = None
+
     if os.getenv("CACHE_BACKEND") == "redis":
         try:
-            import aioredis
-            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-            redis_password = os.getenv("REDIS_PASSWORD")
-            
-            if redis_password and "@" not in redis_url:
-                redis_url = redis_url.replace("redis://", f"redis://:{redis_password}@")
-                
-            _redis_client = await aioredis.from_url(redis_url, decode_responses=True)
+            import redis.asyncio as aioredis
+        except Exception as e:
+            logger.error("Failed to import redis.asyncio", error=str(e))
+            _redis_client = None
+            raise RuntimeError(f"Failed to import redis.asyncio: {e}") from e
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        redis_password = os.getenv("REDIS_PASSWORD")
+
+        if redis_password and "@" not in redis_url:
+            redis_url = redis_url.replace("redis://", f"redis://:{redis_password}@")
+
+        try:
+            _redis_client = aioredis.from_url(redis_url, decode_responses=True)
             await _redis_client.ping()
             logger.info("Redis cache initialized")
         except Exception as e:
-            logger.warning("Redis unavailable, falling back to in-memory dict", error=str(e))
+            # Never log or raise with the URL: it can embed the Redis password.
+            logger.error("Failed to connect to Redis", error=type(e).__name__)
             _redis_client = None
+            raise RuntimeError(
+                f"Could not connect to Redis ({type(e).__name__}); check REDIS_URL and REDIS_PASSWORD"
+            ) from None
+    else:
+        _redis_client = None
 
 async def get_cache(key: str) -> Optional[Any]:
     if _redis_client:
@@ -79,21 +99,32 @@ async def delete_cache(key: str):
     else:
         _local_cache.pop(key, None)
 
-async def increment_metric(key: str, amount: float = 1.0):
+def daily_key(name: str, now: Optional[float] = None) -> str:
+    """Metric key for the current UTC day, e.g. queries_today:2026-11-12 (R-39).
+
+    A new key starts at UTC midnight, so "today" counters reset by themselves.
+    """
+    day = datetime.fromtimestamp(time.time() if now is None else now, tz=timezone.utc)
+    return f"{name}:{day.strftime('%Y-%m-%d')}"
+
+
+async def increment_metric(key: str, amount: float = 1.0, ttl: Optional[int] = None):
     if _redis_client:
         try:
             if isinstance(amount, float) and amount != int(amount):
                 await _redis_client.incrbyfloat(key, amount)
             else:
                 await _redis_client.incrby(key, int(amount))
+            if ttl:
+                await _redis_client.expire(key, ttl)
         except Exception as e:
             logger.error("Redis increment error", error=str(e), key=key)
     else:
         item = _local_cache.get(key)
-        if item:
+        if item and (item[1] is None or item[1] > time.time()):
             val, expiry = item
         else:
-            val, expiry = 0, None
+            val, expiry = 0, (time.time() + ttl if ttl else None)
         _local_cache[key] = (val + amount, expiry)
 
 async def get_metric(key: str) -> float:
@@ -133,6 +164,15 @@ async def get_cache_generation(owner_id: Optional[str]) -> int:
     return int(val)
 
 async def close_cache():
+    global _redis_client
     if _redis_client:
-        await _redis_client.close()
+        try:
+            if hasattr(_redis_client, "aclose"):
+                await _redis_client.aclose()
+            elif hasattr(_redis_client, "close"):
+                await _redis_client.close()
+        except Exception as e:
+            logger.warning("Error closing Redis client", error=str(e))
+        finally:
+            _redis_client = None
 

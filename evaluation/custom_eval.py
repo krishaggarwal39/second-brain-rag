@@ -7,6 +7,7 @@ Measures retrieval quality WITHOUT requiring paid LLM APIs:
 3. Faithfulness (mock) — Does the system refuse out-of-scope questions?
 4. Retrieval Latency — How fast is the hybrid retrieval?
 
+This is a keyword-overlap retrieval evaluation (not the ragas library).
 Results are written to evaluation/reports/eval_report.json
 """
 
@@ -25,6 +26,8 @@ os.environ.setdefault("CACHE_BACKEND", "memory")
 os.environ.setdefault("CHROMA_PERSIST_DIR", os.path.join(os.path.dirname(__file__), "eval_chroma_data"))
 os.environ.setdefault("BM25_DATA_DIR", os.path.join(os.path.dirname(__file__), "eval_bm25_data"))
 os.environ.setdefault("OTEL_ENABLED", "false")
+EVAL_OWNER_ID = os.getenv("EVAL_OWNER_ID", "eval-owner")
+RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "-5.0"))
 
 REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -43,7 +46,7 @@ def load_test_queries() -> List[Dict]:
 def compute_keyword_recall(retrieved_texts: List[str], expected_keywords: List[str]) -> float:
     """What fraction of expected keywords appear in the retrieved context?"""
     if not expected_keywords:
-        return 1.0  # No keywords to check (out-of-scope queries)
+        raise ValueError("in-scope queries need expected_keywords")
 
     combined_text = " ".join(retrieved_texts).lower()
     hits = sum(1 for kw in expected_keywords if kw.lower() in combined_text)
@@ -52,13 +55,26 @@ def compute_keyword_recall(retrieved_texts: List[str], expected_keywords: List[s
 
 def compute_source_precision(retrieved_metadata: List[Dict], expected_source: str) -> float:
     """What fraction of top-k results come from the expected source document?"""
-    if not expected_source or not retrieved_metadata:
-        return 1.0  # N/A for out-of-scope
+    if not expected_source:
+        raise ValueError("in-scope queries need expected_source")
+    if not retrieved_metadata:
+        return 0.0  # nothing retrieved is a precision failure, not a pass
 
     correct = sum(
         1 for m in retrieved_metadata if m.get("filename", "") == expected_source
     )
     return correct / len(retrieved_metadata)
+
+
+def out_of_scope_passes(retrieved: List[Dict], threshold: float = RERANK_THRESHOLD) -> bool:
+    """An off-topic query passes only if relevance pruning leaves NO context.
+
+    That is the condition under which the pipeline refuses without calling the LLM.
+    Previously out-of-scope queries were auto-passed with recall 1.00.
+    """
+    from app.rag.context_engineering import prune_irrelevant_context
+
+    return len(prune_irrelevant_context(retrieved, threshold=threshold)) == 0
 
 
 async def evaluate():
@@ -82,7 +98,7 @@ async def evaluate():
 
         t0 = time.time()
         try:
-            retrieved = await hybrid_search(question, top_k=5)
+            retrieved = await hybrid_search(question, top_k=5, owner_id=EVAL_OWNER_ID)
         except Exception as e:
             print(f"  [{qid}] ERROR: {e}")
             results.append({
@@ -97,20 +113,21 @@ async def evaluate():
         texts = [r.get("text", "") for r in retrieved]
         metadatas = [r.get("metadata", {}) for r in retrieved]
 
-        recall = compute_keyword_recall(texts, expected_kw)
-        precision = compute_source_precision(metadatas, expected_src)
-
-        status = "PASS" if recall >= MIN_CONTEXT_RECALL else "FAIL"
         if category == "out_of_scope":
-            # For out-of-scope, low recall is expected (and fine)
-            status = "PASS"
+            # Recall/precision are not defined for off-topic questions.
+            recall = precision = None
+            status = "PASS" if out_of_scope_passes(retrieved) else "FAIL"
+        else:
+            recall = compute_keyword_recall(texts, expected_kw)
+            precision = compute_source_precision(metadatas, expected_src)
+            status = "PASS" if recall >= MIN_CONTEXT_RECALL else "FAIL"
 
         result = {
             "id": qid,
             "question": question,
             "category": category,
-            "context_recall": round(recall, 3),
-            "source_precision": round(precision, 3),
+            "context_recall": None if recall is None else round(recall, 3),
+            "source_precision": None if precision is None else round(precision, 3),
             "latency_ms": round(latency_ms, 1),
             "retrieved_count": len(retrieved),
             "status": status,
@@ -125,7 +142,10 @@ async def evaluate():
         total_latency += latency_ms
 
         icon = "✓" if status == "PASS" else "✗"
-        print(f"  [{icon}] {qid}: recall={recall:.2f} precision={precision:.2f} ({latency_ms:.0f}ms) - {question[:50]}")
+        if recall is None:
+            print(f"  [{icon}] {qid}: out-of-scope, context after pruning={'none' if status == 'PASS' else 'present'} ({latency_ms:.0f}ms) - {question[:50]}")
+        else:
+            print(f"  [{icon}] {qid}: recall={recall:.2f} precision={precision:.2f} ({latency_ms:.0f}ms) - {question[:50]}")
 
     # Compute aggregates
     avg_recall = total_recall / max(scorable_count, 1)
@@ -170,6 +190,11 @@ async def evaluate():
         sys.exit(1)
     if avg_precision < MIN_CONTEXT_PRECISION:
         print(f"\n  FAIL: Source precision {avg_precision:.3f} < threshold {MIN_CONTEXT_PRECISION}")
+        sys.exit(1)
+
+    oos_failed = [r["id"] for r in results if r.get("category") == "out_of_scope" and r.get("status") == "FAIL"]
+    if oos_failed and os.getenv("EVAL_REQUIRE_OOS", "true").lower() == "true":
+        print(f"\n  FAIL: off-topic queries still retrieved relevant-looking context: {', '.join(oos_failed)}")
         sys.exit(1)
 
     print(f"\n  ALL THRESHOLDS MET ✓")

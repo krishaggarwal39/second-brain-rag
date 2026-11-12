@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import uuid
 import structlog
@@ -10,12 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from app.api.routes import documents, chat, health, metrics, auth
 from app.core.exceptions import ProcessingError, UnsupportedFormatError, DocumentTooLargeError, ScrapingError
 from app.core.logging import setup_logging
 from app.core.cache import init_cache, close_cache, increment_metric
-from app.core.rate_limit import limiter
+from app.core.upload import cleanup_old_uploads
+from app.core.rate_limit import DefaultRateLimitMiddleware, limiter
 from app.core.telemetry import init_telemetry
 from app.core.auth import require_role
 
@@ -26,6 +27,7 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up Second Brain RAG...")
+    cleanup_old_uploads()
     await init_cache()
     
     from app.rag.vectorstore.chroma_store import get_stats
@@ -36,8 +38,22 @@ async def lifespan(app: FastAPI):
         logger.error("ChromaDB connection failed", error=str(e))
             
     yield
-    await close_cache()
     logger.info("Shutting down...")
+    # R-44: release every client, best effort, each independently.
+    try:
+        await close_cache()
+    except Exception as e:
+        logger.warning("Cache close failed", error_type=type(e).__name__)
+    try:
+        from app.rag.graph.neo4j_manager import reset_neo4j_manager
+        reset_neo4j_manager()
+    except Exception as e:
+        logger.warning("Neo4j close failed", error_type=type(e).__name__)
+    try:
+        from app.rag.vectorstore import chroma_store
+        chroma_store._client = None
+    except Exception as e:
+        logger.warning("Chroma reset failed", error_type=type(e).__name__)
 
 app = FastAPI(title="Second Brain RAG API", lifespan=lifespan)
 
@@ -46,7 +62,7 @@ init_telemetry(app)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(DefaultRateLimitMiddleware)
 
 API_KEY = os.getenv("API_KEY")
 API_KEYS_RAW = os.getenv("API_KEYS", "")
@@ -77,7 +93,12 @@ async def verify_api_key(api_key_header: str = Security(api_key_header)):
             status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate API Key"
         )
 
-origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
+if "*" in origins:
+    # allow_credentials stays False below, so "*" cannot leak credentials; still flag it.
+    logger.warning("ALLOWED_ORIGINS contains '*': any website can call this API from a browser")
+if os.getenv("ALLOW_ADMIN_SELF_REGISTER", "false").strip().lower() in ("1", "true", "yes"):
+    logger.warning("ALLOW_ADMIN_SELF_REGISTER is enabled: ADMIN_EMAILS addresses become admin on register/login. Dev only.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -86,10 +107,17 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Key", "X-Request-ID", "Authorization"],
 )
 
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    inbound = request.headers.get("X-Request-ID", "")
+    # R-37: only accept well-formed inbound ids; never echo arbitrary header content.
+    request_id = inbound if _REQUEST_ID_RE.fullmatch(inbound) else str(uuid.uuid4())
     request.state.request_id = request_id
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=request_id)
     
     start_time = time.time()
     response = await call_next(request)
@@ -142,10 +170,14 @@ async def scraping_exception_handler(request: Request, exc: ScrapingError):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled exception", error=str(exc))
-    if hasattr(exc, "status_code"):
-        return build_rfc_7807(exc.status_code, "HTTP Error", getattr(exc, "detail", str(exc)), request)
-    return build_rfc_7807(500, "Internal Server Error", "An unexpected error occurred.", request)
+    # R-36: HTTPException has its own handler; anything reaching here is unexpected.
+    # Log the full traceback server-side, return nothing internal to the client.
+    request_id = getattr(request.state, "request_id", None)
+    logger.exception("Unhandled exception", request_id=request_id, error_type=type(exc).__name__)
+    response = build_rfc_7807(500, "Internal Server Error", "An unexpected error occurred.", request)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    return response
 
 app.include_router(health.router)
 app.include_router(auth.router)
