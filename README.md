@@ -82,7 +82,7 @@ A production-grade Retrieval-Augmented Generation system that turns your documen
 | Vector Store | ChromaDB |
 | Graph DB | Neo4j 5 |
 | Cache | Redis (with in-memory fallback) |
-| Sparse Search | SQLite FTS5 |
+| Sparse Search | PostgreSQL full-text (compose default) or SQLite FTS5 |
 | Observability | OpenTelemetry, structlog |
 | Infrastructure | Docker Compose, Nginx |
 | CI | GitHub Actions (lint + tests + RAG evaluation) |
@@ -104,19 +104,49 @@ cd second-brain-rag
 cp .env.example .env
 ```
 
-Edit `.env` with your API keys and strong passwords for databases.
+Set `GOOGLE_API_KEY` (and optionally `GROQ_API_KEY`) in `.env`. Keep the file private (`chmod 600 .env`).
 
 ### 2. Run with Docker Compose
 
+Development (ports bound to `127.0.0.1`, clearly marked dev-only default passwords):
+
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
-The UI will be available at `http://localhost:5173` (dev) or `http://localhost:80` (production compose).
+Production (every secret is required; compose refuses to start with a missing one):
+
+```bash
+./deploy.sh --generate-secrets   # fills missing secrets in .env with random hex, then deploys
+```
+
+`deploy.sh` validates `.env` by key name, runs `docker compose config`, starts the stack and waits for `/api/health/ready`.
+The UI is at `http://localhost:5173` (dev) or `http://localhost` (prod).
+
+The stack runs: `frontend` (nginx, non-root), `backend` (FastAPI), `worker` (Celery ingestion), `postgres` (sparse index and user accounts), `chroma` (vectors, token auth enforced), `neo4j` (graph), `redis` (cache, job status, rate limits). API and worker share the `uploads` volume.
+
+### HTTPS
+
+Plain HTTP must not be exposed publicly. The prod compose file has an optional Caddy front door that gets a certificate automatically:
+
+```bash
+# .env: DOMAIN=rag.example.com  ACME_EMAIL=ops@example.com  FRONTEND_PORT=127.0.0.1:8080  REAL_IP_FROM=172.16.0.0/12
+docker compose -f docker-compose.prod.yml --profile tls up -d
+```
+
+nginx sends HSTS only when the request arrived over HTTPS.
+
+### First user and admin
+
+Register in the UI, then promote the account (see "Admin roles" below):
+
+```bash
+docker compose -f docker-compose.prod.yml exec backend python -m app.cli promote you@example.com
+```
 
 ### 3. Upload documents
 
-Use the sidebar to upload PDFs/DOCX files or paste a web URL. Documents are chunked, embedded, and indexed automatically.
+Use the sidebar to upload PDFs/DOCX files or paste a web URL. Documents are chunked, embedded, and indexed automatically. Uploaded files are staged in `UPLOAD_DIR` (default `<tempdir>/second_brain_uploads`, mode 0700) and shared with the background worker.
 
 ### 4. Ask questions
 
@@ -189,7 +219,7 @@ Key tuning parameters:
 │   │   │   ├── ingestion.py   # Document processing pipeline
 │   │   │   └── pipeline.py    # Main RAG orchestrator
 │   │   └── main.py            # FastAPI app entry point
-│   ├── tests/                 # pytest suite (~76 tests)
+│   ├── tests/                 # pytest suite (344 tests; see VERIFICATION_LOG.md)
 │   ├── requirements.txt       # Pinned production deps
 │   └── requirements-dev.txt   # Dev/test deps
 ├── frontend/
@@ -210,14 +240,52 @@ Key tuning parameters:
 
 ---
 
+## Upgrading
+
+### GraphRAG Tenant Isolation & Purging Legacy Graph Data
+Starting with the tenant isolation update (R-01), all Neo4j graph nodes and relationships carry an `owner_id`. Any existing graph data without an `owner_id` is considered legacy and is automatically excluded from search and retrieval.
+
+To permanently delete legacy unowned nodes and relationships from Neo4j, run the idempotent maintenance helper:
+
+```python
+from app.rag.graph.neo4j_manager import purge_legacy_graph
+
+deleted_count = purge_legacy_graph()
+print(f"Purged {deleted_count} legacy graph nodes")
+```
+
+This helper is safe to run multiple times and does not run automatically on startup.
+
+### Admin roles
+
+Registration always creates a normal `user`, and emails are matched case-insensitively. The role stored in the database decides access on every request, so a change applies immediately. Register the account first, then promote it from inside the backend container:
+
+```bash
+python -m app.cli promote admin@example.com
+python -m app.cli demote admin@example.com
+python -m app.cli promote-from-env   # promotes already-registered users listed in ADMIN_EMAILS
+```
+
+`ALLOW_ADMIN_SELF_REGISTER=true` restores the old behaviour (ADMIN_EMAILS applied on register/login). Use it for local development only. There is no email verification, so whoever registers a listed address first would become admin.
+
+## Security model
+
+- The JWT is the per-user boundary. All documents, vectors, sparse index rows, cache entries and graph data are scoped by the user id from the token.
+- `X-API-Key` is a coarse shared gate. In the Docker setup nginx injects it for every caller, so it is not per-user security.
+- Auth endpoints are rate limited per IP (`AUTH_RATE_LIMIT`). Repeated failed logins for one email trigger a temporary lockout. Other limits are keyed per user when a valid token is present.
+- Behind a reverse proxy, set `TRUSTED_PROXY_CIDRS` so client IPs come from `X-Forwarded-For`. The header is ignored from any other peer.
+
+---
+
 ## Limitations & Future Work
 
-- **Single-tenant**: Multi-key auth provides basic client separation but not full RBAC or user-scoped document isolation.
-- **Evaluation is retrieval-only**: The eval pipeline tests context quality but not end-to-end answer quality (would need LLM-as-Judge with API costs).
+- **No email verification**: registration is open; admins are promoted out of band (`python -m app.cli`).
+- **Answer-quality evaluation needs paid keys**: CI runs the keyword-overlap retrieval eval and a dry run of `answer_eval.py`; the real LLM-as-judge run is manual.
+- **Chroma stays on 0.5.x**: Chroma 1.x OSS has no built-in server auth, so the server and the HTTP-only client are pinned to 0.5.23 together.
 
 ### Scaling the sparse store
 
-The default SQLite FTS5 BM25 store uses file-level locking and must run with single-worker Gunicorn. A PostgreSQL full-text-search backend is also included for horizontal scaling across multiple workers. To enable it, set in your `.env`:
+Both compose stacks use the PostgreSQL backend by default. The SQLite FTS5 store (handy outside Docker) uses file-level locking and must run with single-worker Gunicorn. To use Postgres outside Docker, set:
 
 ```bash
 SPARSE_BACKEND=postgres
@@ -225,10 +293,9 @@ DATABASE_URL=postgresql://postgres:postgrespassword@postgres:5432/second_brain
 GUNICORN_WORKERS=4
 ```
 
-The Docker Compose stack already provisions a `postgres` service. The Postgres store uses a `tsvector` GIN index with `websearch_to_tsquery` ranking and a fork-aware connection pool safe for multi-process Gunicorn.
+The Postgres store uses a `tsvector` GIN index with OR-semantics `to_tsquery` (the same matching as SQLite) and a fork-aware connection pool safe for multi-process Gunicorn.
 
 Potential improvements:
-- Role-based access control with JWT
 - Multi-modal document parsing (images, tables as structured data)
 - Streaming graph updates with change-data-capture
 - Elasticsearch sparse backend for cross-node sharding
