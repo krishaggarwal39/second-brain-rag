@@ -233,9 +233,23 @@ async def judge_answer(
     return None
 
 
-async def run(limit: Optional[int] = None) -> Dict:
-    require_api_keys()
-    from app.rag.pipeline import pipeline
+async def _dry_answer(item: Dict) -> Dict:
+    """Deterministic stand-in for pipeline.ask (no LLM, no network)."""
+    if item["category"] == "out_of_scope":
+        return {"answer": "I cannot answer this based on the provided documents.", "citations": []}
+    return {"answer": item["reference_answer"], "citations": [{"filename": "dry-run", "excerpt": ""}]}
+
+
+async def run(limit: Optional[int] = None, dry_run: bool = False) -> Dict:
+    """Score answers. --dry-run exercises the whole harness with fakes (CI smoke test):
+    no API keys, no LLM calls, no cache writes, separate report file."""
+    global REPORT_PATH
+    if dry_run:
+        REPORT_PATH = REPORT_PATH.replace(".json", "_dryrun.json")
+        pipeline = None
+    else:
+        require_api_keys()
+        from app.rag.pipeline import pipeline
 
     gold = load_gold()
     if limit:
@@ -258,14 +272,14 @@ async def run(limit: Optional[int] = None) -> Dict:
         # EVAL_CONFIG_TAG MUST change whenever the pipeline config under test changes
         # (chunking, retrieval, prompt) so answers are regenerated for the new config.
         ans_key = f"{CONFIG_TAG}\x00{qid}\x00{question}"
-        cached_ans = answer_cache.get(ans_key)
+        cached_ans = None if dry_run else answer_cache.get(ans_key)
         t0 = time.time()
         if cached_ans is not None:
             answer_obj = cached_ans
             gen_ms = 0.0
         else:
             try:
-                answer_obj = await pipeline.ask(question, owner_id=EVAL_OWNER_ID)
+                answer_obj = (await _dry_answer(item)) if dry_run else await pipeline.ask(question, owner_id=EVAL_OWNER_ID)
             except Exception as e:
                 print(f"  [{qid}] GENERATION ERROR: {e.__class__.__name__}: {e}")
                 results.append({"id": qid, "question": question, "category": category,
@@ -295,14 +309,16 @@ async def run(limit: Optional[int] = None) -> Dict:
             continue
 
         # Persist this good answer so re-runs of the SAME config never re-generate it.
-        if cached_ans is None:
+        if cached_ans is None and not dry_run:
             answer_cache[ans_key] = {"answer": answer_obj.get("answer"),
                                      "citations": citations}
             _save_answer_cache(answer_cache)
 
         cache_key = _judge_cache_key(question, answer)
-        scores = judge_cache.get(cache_key)
-        if scores is None:
+        scores = None if dry_run else judge_cache.get(cache_key)
+        if dry_run:
+            scores = {"faithfulness": 1.0, "answer_correctness": 1.0, "context_relevance": 1.0, "reason": "dry-run"}
+        elif scores is None:
             # Only spend quota (and pace) on a cache miss.
             if PACING_SECONDS > 0:
                 await asyncio.sleep(PACING_SECONDS)
@@ -389,4 +405,6 @@ async def run(limit: Optional[int] = None) -> Dict:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None, help="only evaluate the first N questions (smoke test)")
-    asyncio.run(run(limit=ap.parse_args().limit))
+    ap.add_argument("--dry-run", action="store_true", help="fake generator and judge; no keys or network")
+    args = ap.parse_args()
+    asyncio.run(run(limit=args.limit, dry_run=args.dry_run))
