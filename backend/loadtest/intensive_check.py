@@ -2,8 +2,9 @@ import asyncio
 import os
 import structlog
 from dotenv import load_dotenv
-load_dotenv()
 from langchain_core.documents import Document
+
+load_dotenv()
 
 # Set mock env vars just in case
 os.environ["CHROMA_PERSIST_DIR"] = "./chroma_data_test"
@@ -69,7 +70,7 @@ async def run_intensive_test():
         logger.info("Testing Context Engineering...")
         from app.rag.context_engineering import prune_irrelevant_context, build_dynamic_prompt
         pruned = prune_irrelevant_context(hybrid_results, threshold=-10.0) # Low threshold for test
-        prompt = build_dynamic_prompt(pruned, graph_context)
+        build_dynamic_prompt(pruned, graph_context)
         logger.info("Prompt dynamically built successfully.")
         
         # 9. Test Full Pipeline Ask

@@ -19,9 +19,7 @@ Run:
 import os
 import io
 import uuid
-import time
-import json
-from locust import HttpUser, task, between, events
+from locust import HttpUser, task, between
 
 # A tiny valid PDF (single blank page) so upload + ingestion actually works.
 # Generating it inline avoids needing an external fixture file.

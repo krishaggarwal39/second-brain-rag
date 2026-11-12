@@ -46,7 +46,9 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# Vector Database
+# Vector Database (local data never belongs in git)
+chroma_data/
+chroma_data_test/
 chroma_db/
 backend/chroma_db/
 backend/chroma_data_test/
@@ -100,3 +102,9 @@ frontend/playwright/.cache/
 backend/coverage.xml
 backend/.coverage
 backend/.coverage.*
+
+# Local scratch artifacts (not part of the project)
+/test.js
+/browser_test.py
+/proof_of_success.png
+/graphify-out/
