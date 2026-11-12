@@ -1,5 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import { apiErrorMessage, apiErrorStatus } from '../utils/errors';
+import {
+  LEGACY_TOKEN_KEY,
+  TOKEN_KEY,
+  USER_EMAIL_KEY,
+  clearStoredAuth,
+  getStoredToken,
+  storeToken,
+} from '../utils/authStorage';
 
 export interface AuthContextType {
   token: string | null;
@@ -11,10 +20,6 @@ export interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const TOKEN_KEY = 'access_token';
-const LEGACY_TOKEN_KEY = 'token';
-const USER_EMAIL_KEY = 'user_email';
 
 function parseEmailFromToken(jwt: string | null): string | null {
   if (!jwt) return null;
@@ -36,24 +41,12 @@ function parseEmailFromToken(jwt: string | null): string | null {
   }
 }
 
-function getStoredToken(): string | null {
-  const token = localStorage.getItem(TOKEN_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY);
-  return token && token.trim().length > 0 ? token : null;
-}
-
 function saveToken(token: string, email?: string) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(LEGACY_TOKEN_KEY, token);
+  storeToken(token);
   const resolvedEmail = email || parseEmailFromToken(token);
   if (resolvedEmail) {
     localStorage.setItem(USER_EMAIL_KEY, resolvedEmail);
   }
-}
-
-function clearStoredAuth() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(LEGACY_TOKEN_KEY);
-  localStorage.removeItem(USER_EMAIL_KEY);
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -106,21 +99,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       saveToken(accessToken, email);
       setToken(accessToken);
       setUserEmail(email || parseEmailFromToken(accessToken));
-    } catch (err: any) {
-      const status = err.response?.status;
-      const detail = err.response?.data?.detail;
-      let message = 'Login failed. Please check your credentials.';
-
-      if (typeof detail === 'string') {
-        message = detail;
-      } else if (Array.isArray(detail)) {
-        message = detail.map((d: any) => d.msg || JSON.stringify(d)).join(', ');
-      } else if (status === 401) {
-        message = 'Invalid email or password.';
-      } else if (err.message) {
-        message = err.message;
-      }
-      throw new Error(message);
+    } catch (err: unknown) {
+      const fallback =
+        apiErrorStatus(err) === 401 ? 'Invalid email or password.' : 'Login failed. Please check your credentials.';
+      throw new Error(apiErrorMessage(err, fallback), { cause: err });
     }
   }, []);
 
@@ -134,21 +116,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       saveToken(accessToken, email);
       setToken(accessToken);
       setUserEmail(email || parseEmailFromToken(accessToken));
-    } catch (err: any) {
-      const status = err.response?.status;
-      const detail = err.response?.data?.detail;
-      let message = 'Registration failed. Please try again.';
-
-      if (typeof detail === 'string') {
-        message = detail;
-      } else if (Array.isArray(detail)) {
-        message = detail.map((d: any) => d.msg || JSON.stringify(d)).join(', ');
-      } else if (status === 409) {
-        message = 'An account with this email already exists.';
-      } else if (err.message) {
-        message = err.message;
-      }
-      throw new Error(message);
+    } catch (err: unknown) {
+      const fallback =
+        apiErrorStatus(err) === 409
+          ? 'An account with this email already exists.'
+          : 'Registration failed. Please try again.';
+      throw new Error(apiErrorMessage(err, fallback), { cause: err });
     }
   }, []);
 

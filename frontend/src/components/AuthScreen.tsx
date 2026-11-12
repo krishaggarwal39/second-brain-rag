@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { BrainCircuit, Mail, Lock, LogIn, UserPlus, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { apiErrorMessage } from '../utils/errors';
 
 export default function AuthScreen() {
   const { login, register } = useAuth();
@@ -31,8 +32,8 @@ export default function AuthScreen() {
       } else {
         await login(email.trim(), password);
       }
-    } catch (err: any) {
-      setError(err?.message || 'Authentication failed. Please try again.');
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err, 'Authentication failed. Please try again.'));
     } finally {
       setIsLoading(false);
     }

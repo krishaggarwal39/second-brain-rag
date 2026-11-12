@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getStoredToken, logoutEverywhere } from '../utils/authStorage';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
@@ -14,7 +15,7 @@ api.interceptors.request.use((config) => {
     config.headers['X-API-Key'] = apiKey;
   }
 
-  const token = localStorage.getItem('access_token') || localStorage.getItem('token');
+  const token = getStoredToken();
   if (token) {
     config.headers['Authorization'] = `Bearer ${token}`;
   }
@@ -26,13 +27,11 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    console.error('API Error:', error.response?.data || error.message);
+    // R-42: log status and URL only; response bodies can contain user data.
+    console.error('API Error:', error.response?.status ?? error.message, error.config?.url);
 
     if (error.response?.status === 401) {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('token');
-      localStorage.removeItem('user_email');
-      window.dispatchEvent(new CustomEvent('auth:logout'));
+      logoutEverywhere();
     }
 
     const originalRequest = error.config;

@@ -1,12 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, Trash2 } from 'lucide-react';
-import Citations, { Citation } from './Citations';
-
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-  citations?: Citation[];
-}
+import Citations from './Citations';
+import { buildChatPayload, CHAT_ERROR_PREFIX, Message } from '../utils/chatPayload';
+import { getStoredToken, logoutEverywhere } from '../utils/authStorage';
+import { apiErrorMessage } from '../utils/errors';
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -20,7 +17,7 @@ export default function ChatInterface() {
     }
   }, [messages, isTyping]);
 
-  const handleSend = async (e: React.FormEvent) => {
+  const handleSend = async (e: React.SyntheticEvent) => {
     e.preventDefault();
     if (!input.trim() || isTyping) return;
 
@@ -29,8 +26,8 @@ export default function ChatInterface() {
     setInput('');
     setIsTyping(true);
 
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
-    const payload = { question: userMessage.content, chat_history: history };
+    const payload = buildChatPayload(userMessage.content, messages);
+    let aiMessageAdded = false;
 
     try {
       const baseUrl = import.meta.env.VITE_API_URL || '/api';
@@ -46,7 +43,7 @@ export default function ChatInterface() {
       }
 
       // Attach Bearer token for JWT authentication
-      const token = localStorage.getItem('access_token') || localStorage.getItem('token');
+      const token = getStoredToken();
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
@@ -62,10 +59,7 @@ export default function ChatInterface() {
       // inside the parse loop and leave isTyping stuck as true forever.
       if (!response.ok) {
         if (response.status === 401) {
-          localStorage.removeItem('access_token');
-          localStorage.removeItem('token');
-          localStorage.removeItem('user_email');
-          window.dispatchEvent(new CustomEvent('auth:logout'));
+          logoutEverywhere();
         }
 
         let detail = `HTTP ${response.status}`;
@@ -85,6 +79,7 @@ export default function ChatInterface() {
 
       const aiMessage: Message = { role: 'assistant', content: '' };
       setMessages((prev) => [...prev, aiMessage]);
+      aiMessageAdded = true;
 
       let buffer = '';
       let streamDone = false;
@@ -125,20 +120,37 @@ export default function ChatInterface() {
                 return next;
               });
             }
-          } catch {
-            // Ignore unparseable lines (keep-alive comments, etc.)
+          } catch (parseError) {
+            console.warn('Failed to parse SSE JSON:', parseError, dataStr);
           }
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Chat stream error:', error);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: `⚠️ Error: ${error?.message || 'An unexpected error occurred.'}`,
-        },
-      ]);
+      const reason = apiErrorMessage(error, 'An unexpected error occurred.');
+      const errorText = `${CHAT_ERROR_PREFIX} ${reason}`;
+      setMessages((prev) => {
+        if (aiMessageAdded) {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last && last.role === 'assistant' && !last.content) {
+            next[next.length - 1] = {
+              role: 'assistant',
+              content: errorText,
+              isError: true,
+            };
+            return next;
+          }
+        }
+        return [
+          ...prev,
+          {
+            role: 'assistant',
+            content: errorText,
+            isError: true,
+          },
+        ];
+      });
     } finally {
       // isTyping is always cleared — even on error — so the UI is never frozen.
       setIsTyping(false);
@@ -149,8 +161,9 @@ export default function ChatInterface() {
 
   return (
     <div className="chat-container">
-      <div className="chat-header" role="banner">
-        <div className="chat-status" aria-label="Online status indicator" />
+      {/* A plain section header: the page-level banner landmark belongs to App. */}
+      <div className="chat-header">
+        <div className="chat-status" aria-hidden="true" />
         <h2 style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--text-primary)' }}>
           AI Research Assistant
         </h2>
@@ -181,6 +194,7 @@ export default function ChatInterface() {
         {messages.map((msg, i) => (
           <div key={i} className={`message ${msg.role}`}>
             <div className="bubble">
+              <span className="sr-only">{msg.role === 'user' ? 'You said: ' : 'Assistant said: '}</span>
               {msg.content}
               {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 && (
                 <Citations citations={msg.citations} />
@@ -190,7 +204,7 @@ export default function ChatInterface() {
         ))}
 
         {isTyping && messages[messages.length - 1]?.role !== 'assistant' && (
-          <div className="message ai" aria-live="polite" aria-label="AI is generating a response">
+          <div className="message ai" role="status" aria-live="polite" aria-label="AI is generating a response">
             <div
               className="bubble"
               style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', minHeight: '44px' }}
@@ -205,14 +219,15 @@ export default function ChatInterface() {
       </div>
 
       <div className="chat-input-wrapper">
-        <form onSubmit={handleSend} className="input-box" role="search" aria-label="Send a message">
+        {/* A named form, not role="search": this composes a chat message. */}
+        <form onSubmit={handleSend} className="input-box" aria-label="Send a message">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                handleSend(e as any);
+                handleSend(e);
               }
             }}
             placeholder="Ask AI Assistant…"
