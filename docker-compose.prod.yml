@@ -146,7 +146,7 @@ services:
     <<: *hardening
 
   neo4j:
-    image: neo4j:5.26.29
+    image: neo4j:5.26.32
     restart: unless-stopped
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}
