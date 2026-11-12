@@ -32,7 +32,7 @@ def auth_headers():
         with store._lock:
             cur = store.conn.execute("SELECT id FROM users WHERE id = 1")
             if not cur.fetchone():
-                hashed = pwd_context.hash("strongpassword123")
+                hashed = pwd_context.hash("Corr3ct-Horse-Battery")
                 store.conn.execute(
                     "INSERT OR IGNORE INTO users (id, email, hashed_password, created_at) VALUES (1, ?, ?, ?)",
                     ("testuser1@example.com", hashed, datetime.now(timezone.utc).isoformat())
@@ -273,21 +273,21 @@ class TestDocumentRoutes:
              patch("app.worker.process_file_task.delay"), \
              patch("magic.from_file", return_value="application/pdf"):
 
-            # 1. URL upload bumps generation for owner "1"
+            # R-12: enqueueing must NOT bump the generation (data has not changed
+            # yet; the worker bumps on completion). The old assertion encoded the bug.
+            # 1. URL upload enqueue
             res = client.post("/documents/url", headers=auth_headers, json={"url": "https://example.com/test"})
             assert res.status_code == 200
-            mock_bump.assert_called_with("1")
+            mock_bump.assert_not_called()
 
-            mock_bump.reset_mock()
-
-            # 2. File upload bumps generation for owner "1"
+            # 2. File upload enqueue
             res = client.post(
                 "/documents/upload",
                 headers=auth_headers,
                 files={"file": ("doc.pdf", b"%PDF-1.4 dummy", "application/pdf")},
             )
             assert res.status_code == 200
-            mock_bump.assert_called_with("1")
+            mock_bump.assert_not_called()
 
             mock_bump.reset_mock()
 
@@ -372,7 +372,7 @@ class TestAuthRoutes:
         # Register user
         reg_resp = client.post("/auth/register", json={
             "email": test_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert reg_resp.status_code == 200
         assert "access_token" in reg_resp.json()
@@ -380,14 +380,14 @@ class TestAuthRoutes:
         # Duplicate register should fail with 409
         dup_resp = client.post("/auth/register", json={
             "email": test_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert dup_resp.status_code == 409
 
         # Login with valid credentials
         login_resp = client.post("/auth/login", json={
             "email": test_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert login_resp.status_code == 200
         assert "access_token" in login_resp.json()
@@ -418,17 +418,19 @@ class TestAuthRoutes:
 
     def test_register_and_login_with_admin_emails_yields_admin_role(self, client, monkeypatch):
         import uuid
-        from jose import jwt
+        import jwt
         import app.core.auth as auth_mod
         from app.core.auth import get_user_store
 
         admin_email = f"admin_{uuid.uuid4()}@example.com"
         monkeypatch.setenv("ADMIN_EMAILS", f"other@example.com,{admin_email}")
+        # Env-based elevation is a dev-only opt-in since R-04.
+        monkeypatch.setenv("ALLOW_ADMIN_SELF_REGISTER", "true")
 
         # Register
         reg_resp = client.post("/auth/register", json={
             "email": admin_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert reg_resp.status_code == 200
         token = reg_resp.json()["access_token"]
@@ -442,7 +444,7 @@ class TestAuthRoutes:
         # Login
         login_resp = client.post("/auth/login", json={
             "email": admin_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert login_resp.status_code == 200
         login_token = login_resp.json()["access_token"]
@@ -451,7 +453,7 @@ class TestAuthRoutes:
 
     def test_register_and_login_with_normal_email_yields_user_role(self, client, monkeypatch):
         import uuid
-        from jose import jwt
+        import jwt
         import app.core.auth as auth_mod
         from app.core.auth import get_user_store
 
@@ -461,7 +463,7 @@ class TestAuthRoutes:
         # Register
         reg_resp = client.post("/auth/register", json={
             "email": normal_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert reg_resp.status_code == 200
         token = reg_resp.json()["access_token"]
@@ -475,7 +477,7 @@ class TestAuthRoutes:
         # Login
         login_resp = client.post("/auth/login", json={
             "email": normal_email,
-            "password": "strongpassword123"
+            "password": "Corr3ct-Horse-Battery"
         })
         assert login_resp.status_code == 200
         login_token = login_resp.json()["access_token"]

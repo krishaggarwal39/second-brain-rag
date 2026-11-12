@@ -1,10 +1,12 @@
 import os
 import sqlite3
 import threading
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
-from jose import jwt, JWTError
+import jwt
+from jwt import PyJWTError as JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -16,7 +18,7 @@ except ImportError:
     sql = None
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
-JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRY_MINUTES", "1440"))
+JWT_EXPIRY_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES") or os.getenv("JWT_EXPIRY_MINUTES") or "480")
 JWT_ALGORITHM = "HS256"
 
 def validate_jwt_secret(secret: str | None) -> None:
@@ -40,6 +42,37 @@ security = HTTPBearer(auto_error=False)
 _DUMMY_BCRYPT_HASH = "$2b$12$2NK5zg.pDqK6FCWdq0nEher3FLIp032FxthXuJFXDtHvTEUTlUgSq"
 
 
+def normalize_email(email: str | None) -> str:
+    """Canonical form used for storage and lookup (R-04): trimmed and lowercased."""
+    return (email or "").strip().lower()
+
+
+# Small embedded list of very common passwords (R-05). Not exhaustive by design.
+_COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password12", "password123", "password1234", "passw0rd",
+    "12345678", "123456789", "1234567890", "11111111", "00000000", "87654321",
+    "qwerty123", "qwertyuiop", "qwerty12", "1q2w3e4r", "1qaz2wsx", "zaq12wsx",
+    "abc12345", "abcd1234", "iloveyou", "sunshine", "princess", "football",
+    "baseball", "welcome1", "welcome123", "letmein1", "trustno1", "dragon12",
+    "monkey123", "superman", "starwars", "whatever", "computer", "internet",
+    "admin123", "administrator", "changeme", "changeme1", "secret123", "default1",
+    "test1234", "testtest", "asdfghjk", "asdf1234", "michael1", "shadow12",
+    "master12", "freedom1", "strongpassword", "strongpassword123",
+})
+
+
+def validate_password_strength(password: str, email: str = "") -> None:
+    """Raise ValueError for passwords that are trivially guessable (R-05)."""
+    pw = password or ""
+    if len(pw) < 8 or len(pw) > 128:
+        raise ValueError("Password must be between 8 and 128 characters")
+    if pw.lower() in _COMMON_PASSWORDS:
+        raise ValueError("Password is too common")
+    local = normalize_email(email).split("@")[0]
+    if local and pw.lower() == local:
+        raise ValueError("Password must not equal the email name")
+
+
 class UserStore:
     def __init__(self):
         os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
@@ -60,6 +93,7 @@ class UserStore:
         if "role" not in columns:
             self.conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
         self.conn.commit()
+        _ensure_ci_unique_sqlite(self.conn)
         self._lock = threading.Lock()
 
     def user_exists(self, user_id: int) -> bool:
@@ -68,8 +102,14 @@ class UserStore:
             return cursor.fetchone() is not None
 
     def create_user(self, email: str, password: str, role: str = "user") -> int:
+        email = normalize_email(email)
         hashed = pwd_context.hash(password)
         with self._lock:
+            # Case-insensitive duplicate check (legacy rows may be mixed case).
+            if self.conn.execute(
+                "SELECT 1 FROM users WHERE lower(email) = ?", (email,)
+            ).fetchone():
+                raise ValueError("Email already registered")
             try:
                 cursor = self.conn.execute(
                     "INSERT INTO users (email, hashed_password, created_at, role) VALUES (?, ?, ?, ?)",
@@ -82,7 +122,10 @@ class UserStore:
 
     def authenticate(self, email: str, password: str):
         with self._lock:
-            cursor = self.conn.execute("SELECT id, hashed_password FROM users WHERE email = ?", (email,))
+            cursor = self.conn.execute(
+                "SELECT id, hashed_password FROM users WHERE lower(email) = ? ORDER BY id LIMIT 1",
+                (normalize_email(email),),
+            )
             row = cursor.fetchone()
         if not row:
             if hasattr(pwd_context, "dummy_verify"):
@@ -104,6 +147,33 @@ class UserStore:
         with self._lock:
             self.conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
             self.conn.commit()
+
+
+    def get_user_id_by_email(self, email: str) -> int | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id FROM users WHERE lower(email) = ? ORDER BY id LIMIT 1",
+                (normalize_email(email),),
+            ).fetchone()
+        return row[0] if row else None
+
+
+def _ensure_ci_unique_sqlite(conn) -> None:
+    """Add a case-insensitive unique index when legacy data allows it.
+
+    Legacy databases may already hold case-variant duplicates (the R-04 exploit
+    created them). We never delete user rows automatically; lookups resolve to
+    the oldest row instead, and the index is added once duplicates are gone.
+    """
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email_lower ON users(lower(email))")
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        import logging
+        logging.getLogger(__name__).warning(
+            "users table has case-variant duplicate emails; case-insensitive unique index not created"
+        )
 
 
 SQLiteUserStore = UserStore
@@ -169,6 +239,15 @@ class PostgresUserStore:
                 if user_cols and "role" not in user_cols:
                     cur.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
             conn.commit()
+            # Case-insensitive uniqueness (R-04). Skipped if legacy duplicates exist.
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email_lower ON users (lower(email));"
+                    )
+                conn.commit()
+            except psycopg2.Error:
+                conn.rollback()
 
     def user_exists(self, user_id: int) -> bool:
         with self._get_connection() as conn:
@@ -177,10 +256,14 @@ class PostgresUserStore:
                 return cur.fetchone() is not None
 
     def create_user(self, email: str, password: str, role: str = "user") -> int:
+        email = normalize_email(email)
         hashed = pwd_context.hash(password)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 try:
+                    cur.execute("SELECT 1 FROM users WHERE lower(email) = %s", (email,))
+                    if cur.fetchone():
+                        raise ValueError("Email already registered")
                     cur.execute(
                         "INSERT INTO users (email, hashed_password, created_at, role) VALUES (%s, %s, %s, %s) RETURNING id;",
                         (email, hashed, datetime.now(timezone.utc).isoformat(), role),
@@ -195,7 +278,10 @@ class PostgresUserStore:
     def authenticate(self, email: str, password: str) -> int | None:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, hashed_password FROM users WHERE email = %s", (email,))
+                cur.execute(
+                    "SELECT id, hashed_password FROM users WHERE lower(email) = %s ORDER BY id LIMIT 1",
+                    (normalize_email(email),),
+                )
                 row = cur.fetchone()
         if not row:
             if hasattr(pwd_context, "dummy_verify"):
@@ -219,6 +305,17 @@ class PostgresUserStore:
             with conn.cursor() as cur:
                 cur.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
             conn.commit()
+
+
+    def get_user_id_by_email(self, email: str) -> int | None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM users WHERE lower(email) = %s ORDER BY id LIMIT 1",
+                    (normalize_email(email),),
+                )
+                row = cur.fetchone()
+        return row[0] if row else None
 
 
 _user_store: UserStore | PostgresUserStore | None = None
@@ -254,7 +351,7 @@ def resolve_role(email: str) -> str:
     if not admin_emails_raw or not email:
         return "user"
     admin_emails = {e.strip().lower() for e in admin_emails_raw.split(",") if e.strip()}
-    return "admin" if email.strip().lower() in admin_emails else "user"
+    return "admin" if normalize_email(email) in admin_emails else "user"
 
 
 def create_access_token(user_id: int, role: str = "user") -> str:
@@ -281,21 +378,33 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     store = get_user_store()
-    if not store.user_exists(user_id):
+    # R-25: Run synchronous user_exists query in a worker thread to avoid blocking the event loop
+    user_exists = await asyncio.to_thread(store.user_exists, user_id)
+    if not user_exists:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return user_id
 
 
 async def get_current_role(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Role claim from the token (informational only; never used for authorization)."""
     payload = _decode_token(credentials)
     return payload.get("role") or "user"
+
+
+async def get_db_role(user_id: int = Depends(get_current_user)) -> str:
+    """Authoritative role, read from the user store on every request (R-04).
+
+    Promotion and demotion take effect immediately instead of at token expiry.
+    """
+    store = get_user_store()
+    return await asyncio.to_thread(store.get_role, user_id)
 
 
 def require_role(*allowed: str):
     async def role_checker(
         user_id: int = Depends(get_current_user),
-        role: str = Depends(get_current_role),
+        role: str = Depends(get_db_role),
     ) -> int:
         allowed_roles = {r.lower() for r in allowed}
         if role.lower() not in allowed_roles:
