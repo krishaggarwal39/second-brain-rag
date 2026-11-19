@@ -52,7 +52,7 @@ opentelemetry-exporter-otlp-proto-grpc==1.45.2
 # bcrypt stays on 4.0.x: passlib 1.7.4 breaks with bcrypt >= 4.1/5.0.
 bcrypt==4.0.1
 passlib[bcrypt]==1.7.4
-email-validator==2.3.0
+email-validator==2.4.0
 PyJWT[crypto]==2.15.1
 python-magic==0.4.27
 tenacity==9.2.1
