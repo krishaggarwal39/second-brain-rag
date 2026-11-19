@@ -7,7 +7,7 @@
 fastapi==0.162.5
 uvicorn==0.54.0
 gunicorn==27.0.0
-python-multipart==0.0.33
+python-multipart==0.0.34
 
 # --- LLM / LangChain (only core + splitters are used) ---
 langchain-core==1.8.0
