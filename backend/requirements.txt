@@ -30,7 +30,7 @@ beautifulsoup4==4.15.0
 
 # --- Embeddings & Reranking ---
 sentence-transformers==6.3.0
-transformers==5.22.2
+transformers==5.23.0
 # Installed from the PyTorch CPU index in the Docker image (see Dockerfile).
 torch==2.15.0
 
